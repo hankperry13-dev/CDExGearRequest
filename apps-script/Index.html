@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Gear Desk · The Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Outfit:wght@400;500;600;700;800&display=swap">
+  <?!= include('Styles'); ?>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead__inner">
+      <a class="brand" href="#" data-go="desk" aria-label="Gear Desk home">
+        <img class="brand__mark" src="<?= brandDataUri('wordmarkWhite') ?>" alt="The Studio" width="128" height="44">
+        <span class="brand__divider" aria-hidden="true"></span>
+        <span class="brand__text">
+          <span class="brand__app">Gear Desk</span>
+          <span class="brand__org">Center for Digital Expression</span>
+        </span>
+      </a>
+      <div class="masthead__end" id="whoami"></div>
+    </div>
+    <nav class="tabs" aria-label="Main">
+      <button class="tab" data-go="desk">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h18v13H3zM8 7V4h8v3M3 12h18"/></svg>
+        Out now <span class="tab__count" id="countOut" hidden></span>
+      </button>
+      <button class="tab" data-go="checkout">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        Check out
+      </button>
+      <button class="tab" data-go="inventory">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7l8-4 8 4-8 4-8-4zM4 7v10l8 4 8-4V7M12 11v10"/></svg>
+        Inventory
+      </button>
+      <button class="tab" data-go="history">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l3 2"/></svg>
+        History
+      </button>
+      <button class="tab" data-go="settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        Settings
+      </button>
+    </nav>
+  </header>
+
+  <main id="main" tabindex="-1">
+    <div class="loading">
+      <img id="badgeImg" src="<?= brandDataUri('badge') ?>" alt="">
+      <div>Opening the gear desk…</div>
+    </div>
+  </main>
+
+  <dialog class="modal" id="modal" aria-labelledby="modalTitle"></dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <?!= include('App'); ?>
+</body>
+</html>

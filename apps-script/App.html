@@ -1,0 +1,1045 @@
+<script>
+/* Gear Desk — web app (runs in the browser, talks to Code.gs through google.script.run). */
+(function () {
+  'use strict';
+
+  /* ------------------------------------------------------------ */
+  /* State                                                         */
+  /* ------------------------------------------------------------ */
+
+  var LS = 'gearDesk:';
+  function load(k, d) { try { var v = localStorage.getItem(LS + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } }
+  function save(k, v) { try { localStorage.setItem(LS + k, JSON.stringify(v)); } catch (e) { /* storage blocked */ } }
+
+  var BADGE = (document.getElementById('badgeImg') || {}).src || '';
+  var ACTIVE = { 'Out': 1, 'Partially returned': 1 };
+
+  var S = {
+    ready: false,
+    route: 'desk',
+    items: [], rentals: [], settings: {}, conditions: [],
+    me: '', sheetUrl: '', emailQuota: -1,
+    staff: load('staff', ''),
+    q: { desk: '', inv: '', invCat: '', invFilter: 'all', hist: '', histFilter: 'all' },
+    draft: null,
+    flash: '',
+    dataKey: ''
+  };
+
+  var $ = function (sel, root) { return (root || document).querySelector(sel); };
+  var $$ = function (sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); };
+  var main = $('#main');
+  var modal = $('#modal');
+
+  /* ------------------------------------------------------------ */
+  /* Server calls                                                  */
+  /* ------------------------------------------------------------ */
+
+  function call(action, payload) {
+    return new Promise(function (resolve, reject) {
+      if (!window.google || !google.script || !google.script.run) {
+        reject(new Error('Open Gear Desk from its web app link to use it.'));
+        return;
+      }
+      google.script.run
+        .withSuccessHandler(function (res) {
+          if (res && res.ok) {
+            if (res.result && res.result.snapshot) applySnapshot(res.result.snapshot);
+            resolve(res.result);
+          } else {
+            reject(new Error((res && res.error) || 'Something went wrong.'));
+          }
+        })
+        .withFailureHandler(function (err) {
+          var msg = String(err && err.message || err || '');
+          if (/network|timed? ?out|failed to fetch/i.test(msg)) msg = 'Lost the connection. Check your internet and try again.';
+          else if (/authoriz|permission/i.test(msg)) msg = 'You don’t have access to Gear Desk with this Google account.';
+          reject(new Error(msg || 'Something went wrong.'));
+        })
+        .api(action, payload || {});
+    });
+  }
+
+  function applySnapshot(snap) {
+    S.items = snap.items || [];
+    S.rentals = snap.rentals || [];
+    S.dataKey = JSON.stringify([S.items, S.rentals]);
+  }
+
+  function boot() {
+    call('bootstrap').then(function (res) {
+      applySnapshot(res);
+      S.me = res.me; S.settings = res.settings; S.conditions = res.conditions;
+      S.sheetUrl = res.sheetUrl; S.emailQuota = res.emailQuota;
+      S.ready = true;
+      S.draft = newDraft();
+      renderWho();
+      render();
+    }).catch(function (err) {
+      main.innerHTML = '<div class="empty"><img src="' + esc(BADGE) + '" alt=""><h3>Can’t open the desk</h3><p>' +
+        esc(err.message) + '</p><button class="btn btn--primary" data-act="reload">Try again</button></div>';
+    });
+  }
+
+  // Pick up changes other staff make, without interrupting anyone typing.
+  setInterval(function () {
+    if (!S.ready || document.hidden || modal.open) return;
+    var before = S.dataKey;
+    call('bootstrap').then(function (res) {
+      applySnapshot(res);
+      S.settings = res.settings;
+      S.emailQuota = res.emailQuota;
+      if (S.dataKey === before) return;
+      var typing = document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName);
+      if (S.route === 'checkout') { renderPicker(); renderCart(); }
+      else if (!typing) render();
+      updateCounts();
+    }).catch(function () { /* quiet: next tick will retry */ });
+  }, 60000);
+
+  /* ------------------------------------------------------------ */
+  /* Helpers                                                       */
+  /* ------------------------------------------------------------ */
+
+  function esc(s) {
+    return String(s === undefined || s === null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function plural(n, one, many) { return n + ' ' + (n === 1 ? one : (many || one + 's')); }
+  function byName(a, b) { return a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }); }
+  function norm(s) { return String(s || '').toLowerCase(); }
+
+  var ICON = {
+    plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+    minus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>',
+    x: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+    check: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+    search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>',
+    ret: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14l-5-5 5-5M4 9h11a5 5 0 0 1 0 10h-3"/></svg>',
+    ext: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
+    mail: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18v12H3zM3 7l9 6 9-6"/></svg>'
+  };
+
+  function d(iso) { return iso ? new Date(iso) : null; }
+  function startOfDay(dt) { var x = new Date(dt); x.setHours(0, 0, 0, 0); return x; }
+  function dayDiff(a, b) { return Math.round((startOfDay(b) - startOfDay(a)) / 864e5); }
+  function fmtTime(dt) { return dt.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); }
+  function fmtDay(dt) {
+    var now = new Date();
+    var diff = dayDiff(now, dt);
+    if (diff === 0) return 'Today';
+    if (diff === 1) return 'Tomorrow';
+    if (diff === -1) return 'Yesterday';
+    return dt.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric',
+      year: dt.getFullYear() === now.getFullYear() ? undefined : 'numeric' });
+  }
+  function fmtWhen(iso) { var dt = d(iso); return dt && !isNaN(dt) ? fmtDay(dt) + ', ' + fmtTime(dt) : ''; }
+  function fmtFull(iso) {
+    var dt = d(iso);
+    return dt && !isNaN(dt) ? dt.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+  }
+  function toLocalInput(dt) {
+    var p = function (n) { return ('0' + n).slice(-2); };
+    return dt.getFullYear() + '-' + p(dt.getMonth() + 1) + '-' + p(dt.getDate()) + 'T' + p(dt.getHours()) + ':' + p(dt.getMinutes());
+  }
+  function fromLocalInput(v) { var dt = new Date(v); return isNaN(dt) ? null : dt; }
+
+  function dueAfter(days) {
+    var dt = new Date();
+    dt.setDate(dt.getDate() + days);
+    dt.setHours(Number(S.settings.dueHour) || 17, 0, 0, 0);
+    if (dt < new Date()) dt.setDate(dt.getDate() + 1);
+    return dt;
+  }
+
+  function isActive(r) { return !!ACTIVE[r.status]; }
+  function isOverdue(r) { return isActive(r) && new Date(r.dueAt) < new Date(); }
+  function outstanding(r) { return r.items.filter(function (l) { return l.returned < l.qty; }); }
+  function unitsOut(r) { return outstanding(r).reduce(function (n, l) { return n + l.qty - l.returned; }, 0); }
+  function findRental(id) { return S.rentals.filter(function (r) { return r.id === id; })[0]; }
+  function findItem(id) { return S.items.filter(function (i) { return i.id === id; })[0]; }
+  function activeRentals() { return S.rentals.filter(isActive); }
+
+  function overdueText(r) {
+    var due = new Date(r.dueAt), now = new Date();
+    var days = dayDiff(due, now);
+    if (days >= 1) return plural(days, 'day') + ' late';
+    var hrs = Math.max(1, Math.round((now - due) / 36e5));
+    return plural(hrs, 'hour') + ' late';
+  }
+
+  function duePill(r) {
+    if (!isActive(r)) return '';
+    var due = new Date(r.dueAt);
+    if (isOverdue(r)) return '<span class="pill pill--bad">Overdue · ' + esc(overdueText(r)) + '</span>';
+    var diff = dayDiff(new Date(), due);
+    if (diff === 0) return '<span class="pill pill--warn">Due today, ' + esc(fmtTime(due)) + '</span>';
+    return '<span class="pill pill--info">Due ' + esc(fmtDay(due)) + (diff === 1 ? ', ' + esc(fmtTime(due)) : '') + '</span>';
+  }
+
+  function statusPill(r) {
+    if (isOverdue(r)) return '<span class="pill pill--bad">Overdue</span>';
+    if (r.status === 'Out') return '<span class="pill pill--info">Out</span>';
+    if (r.status === 'Partially returned') return '<span class="pill pill--tag">Partly back</span>';
+    if (r.status === 'Returned') return '<span class="pill pill--ok">Returned</span>';
+    return '<span class="pill pill--muted">' + esc(r.status) + '</span>';
+  }
+
+  function availPill(it) {
+    if (it.archived) return '<span class="pill pill--muted">Archived</span>';
+    if (it.available > 0) return '<span class="pill pill--ok">' + it.available + ' available</span>';
+    if (it.totalQty === 0) return '<span class="pill pill--muted">None owned</span>';
+    return '<span class="pill pill--warn">All out</span>';
+  }
+
+  var toastTimer;
+  function toast(msg, bad) {
+    var el = $('#toast');
+    el.textContent = msg;
+    el.className = 'toast' + (bad ? ' is-bad' : '');
+    el.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { el.hidden = true; }, bad ? 6000 : 4000);
+  }
+
+  function busy(btn, on, label) {
+    if (!btn) return;
+    if (on) {
+      btn.dataset.label = btn.innerHTML;
+      btn.innerHTML = '<span class="spinner" aria-hidden="true"></span> ' + esc(label || 'Saving…');
+      btn.disabled = true;
+    } else if (btn.dataset.label !== undefined) {
+      btn.innerHTML = btn.dataset.label;
+      btn.disabled = false;
+    }
+  }
+
+  function staffOptions() {
+    return '<datalist id="staffList">' + (S.settings.staff || []).map(function (n) {
+      return '<option value="' + esc(n) + '">';
+    }).join('') + '</datalist>';
+  }
+
+  function staffField(id, label) {
+    return '<label class="field"><span>' + esc(label) + ' <span class="req">*</span></span>' +
+      '<input id="' + id + '" list="staffList" autocomplete="off" required data-staff placeholder="Your name" value="' + esc(S.staff) + '">' +
+      '</label>';
+  }
+
+  function categories() {
+    var set = {};
+    (S.settings.categories || []).forEach(function (c) { set[c] = 1; });
+    S.items.forEach(function (i) { if (i.category) set[i.category] = 1; });
+    return Object.keys(set);
+  }
+
+  /* ------------------------------------------------------------ */
+  /* Rendering                                                     */
+  /* ------------------------------------------------------------ */
+
+  var VIEWS = { desk: viewDesk, checkout: viewCheckout, inventory: viewInventory, history: viewHistory, settings: viewSettings };
+
+  function go(route) {
+    if (!VIEWS[route]) route = 'desk';
+    S.route = route;
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  function render() {
+    if (!S.ready) return;
+    $$('.tab').forEach(function (t) {
+      if (t.dataset.go === S.route) t.setAttribute('aria-current', 'page'); else t.removeAttribute('aria-current');
+    });
+    updateCounts();
+    main.innerHTML = VIEWS[S.route]() + staffOptions();
+    if (S.route === 'desk') renderDeskList();
+    if (S.route === 'checkout') { renderPicker(); renderCart(); }
+    if (S.route === 'inventory') renderInvList();
+    if (S.route === 'history') renderHistList();
+  }
+
+  function updateCounts() {
+    var act = activeRentals();
+    var od = act.filter(isOverdue).length;
+    var el = $('#countOut');
+    el.hidden = !act.length;
+    el.textContent = od ? od + ' late' : act.length;
+    el.classList.toggle('is-bad', od > 0);
+  }
+
+  function renderWho() {
+    var html = '';
+    if (S.me) html += '<span>' + esc(S.me) + '</span>';
+    if (S.sheetUrl) html += '<a href="' + esc(S.sheetUrl) + '" target="_blank" rel="noopener">Spreadsheet</a>';
+    $('#whoami').innerHTML = html;
+  }
+
+  /* ---------- Out now ---------- */
+
+  function viewDesk() {
+    var act = activeRentals();
+    var od = act.filter(isOverdue);
+    var today = act.filter(function (r) { return !isOverdue(r) && dayDiff(new Date(), new Date(r.dueAt)) === 0; });
+    var units = act.reduce(function (n, r) { return n + unitsOut(r); }, 0);
+    var live = S.items.filter(function (i) { return !i.archived; });
+    var avail = live.reduce(function (n, i) { return n + i.available; }, 0);
+    var owned = live.reduce(function (n, i) { return n + i.totalQty; }, 0);
+    var now = new Date();
+
+    return '<div class="page-head"><div>' +
+      '<p class="eyebrow">' + esc(now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })) + '</p>' +
+      '<h1 class="display">Out now</h1></div>' +
+      '<div class="page-head__actions"><button class="btn btn--primary btn--lg" data-go="checkout">' + ICON.plus + 'New checkout</button></div></div>' +
+      '<div class="stats">' +
+      stat('', 'Loans out', act.length, plural(units, 'piece') + ' of gear') +
+      stat('stat--bad' + (od.length ? ' is-hot' : ''), 'Overdue', od.length, od.length ? 'follow up today' : 'nothing late') +
+      stat('stat--gold', 'Due today', today.length, today.length ? 'coming back' : 'none due') +
+      stat('stat--blue', 'On the shelf', avail, 'of ' + plural(owned, 'piece') + ' owned') +
+      '</div>' +
+      (act.length ? '<div class="toolbar"><label class="search"><span class="sr-only">Search loans</span>' + ICON.search +
+        '<input type="search" data-q="desk" placeholder="Search by borrower, gear, or rental #" value="' + esc(S.q.desk) + '"></label></div>' : '') +
+      '<div id="deskList" class="rental-list"></div>';
+  }
+
+  function stat(cls, label, value, sub) {
+    return '<div class="stat ' + cls + '"><div class="stat__label">' + esc(label) + '</div>' +
+      '<div class="stat__value">' + esc(value) + '</div><div class="stat__sub">' + esc(sub) + '</div></div>';
+  }
+
+  function rentalMatches(r, q) {
+    if (!q) return true;
+    var hay = [r.id, r.borrowerName, r.borrowerEmail, r.borrowerGroup, r.checkedOutBy, r.notes]
+      .concat(r.items.map(function (l) { return l.name + ' ' + l.assetTag; })).join(' ');
+    return norm(hay).indexOf(norm(q).trim()) !== -1;
+  }
+
+  function renderDeskList() {
+    var box = $('#deskList');
+    if (!box) return;
+    var act = activeRentals();
+    if (!act.length) {
+      var noGear = !S.items.some(function (i) { return !i.archived; });
+      box.innerHTML = '<div class="empty"><img src="' + esc(BADGE) + '" alt="">' +
+        (noGear
+          ? '<h3>Let’s stock the shelves</h3><p>Add the studio’s gear to the inventory first, then you can start checking it out.</p>' +
+            '<button class="btn btn--primary" data-go="inventory">Go to inventory</button>'
+          : '<h3>All gear is home</h3><p>Nothing is checked out right now. When someone borrows gear, it shows up here until it’s returned.</p>' +
+            '<button class="btn btn--primary" data-go="checkout">' + ICON.plus + 'Start a checkout</button>') +
+        '</div>';
+      return;
+    }
+    var list = act.filter(function (r) { return rentalMatches(r, S.q.desk); });
+    list.sort(function (a, b) {
+      var oa = isOverdue(a), ob = isOverdue(b);
+      if (oa !== ob) return oa ? -1 : 1;
+      return new Date(a.dueAt) - new Date(b.dueAt);
+    });
+    box.innerHTML = list.length ? list.map(rentalCard).join('')
+      : '<div class="empty"><h3>No matches</h3><p>No open loans match “' + esc(S.q.desk) + '”.</p></div>';
+  }
+
+  function rentalCard(r) {
+    var od = isOverdue(r);
+    var chips = r.items.map(function (l) {
+      var left = l.qty - l.returned;
+      return left > 0
+        ? '<li><b>' + left + '×</b> ' + esc(l.name) + '</li>'
+        : '<li class="is-back" title="Returned">' + l.qty + '× ' + esc(l.name) + '</li>';
+    }).join('');
+    return '<article class="rcard' + (od ? ' is-overdue' : '') + (S.flash === r.id ? ' is-flash' : '') + '">' +
+      '<div><div class="rcard__top"><span class="rid">' + esc(r.id) + '</span>' + duePill(r) +
+      (r.status === 'Partially returned' ? '<span class="pill pill--tag pill--plain">Partly returned</span>' : '') + '</div>' +
+      '<h3 class="rcard__name">' + esc(r.borrowerName) + (r.borrowerGroup ? '<small>' + esc(r.borrowerGroup) + '</small>' : '') + '</h3>' +
+      '<div class="rcard__meta">' + esc(r.borrowerEmail) + ' · out ' + esc(fmtWhen(r.checkedOutAt)) + ' by ' + esc(r.checkedOutBy) + '</div>' +
+      '<ul class="chips">' + chips + '</ul></div>' +
+      '<div class="rcard__actions"><button class="btn btn--ghost" data-act="details" data-id="' + esc(r.id) + '">Details</button>' +
+      '<button class="btn btn--primary" data-act="return" data-id="' + esc(r.id) + '">' + ICON.ret + 'Confirm return</button></div>' +
+      '</article>';
+  }
+
+  /* ---------- Check out ---------- */
+
+  function newDraft() {
+    return {
+      borrowerName: '', borrowerEmail: '', borrowerPhone: '', borrowerGroup: '',
+      dueAt: toLocalInput(dueAfter(Number(S.settings.defaultLoanDays) || 0)),
+      notes: '', lines: {}, order: [], q: '', cat: '',
+      sendEmail: S.settings.checkoutEmail !== false
+    };
+  }
+
+  function pastBorrowers() {
+    var seen = {}, out = [];
+    S.rentals.forEach(function (r) {
+      var k = norm(r.borrowerName);
+      if (!k || seen[k]) return;
+      seen[k] = 1;
+      out.push(r);
+    });
+    return out;
+  }
+
+  function viewCheckout() {
+    var D = S.draft;
+    var borrowers = pastBorrowers();
+    var cats = categories();
+    var quick = [[0, 'Today'], [1, 'Tomorrow'], [3, '3 days'], [7, '1 week'], [14, '2 weeks']];
+    return '<div class="page-head"><div><p class="eyebrow">New loan</p><h1 class="display">Check out gear</h1></div></div>' +
+      '<form id="coForm" class="checkout" novalidate autocomplete="off">' +
+
+      '<section class="panel checkout__borrower"><h2 class="panel__title"><span class="step">1</span>Who’s borrowing?</h2>' +
+      '<label class="field"><span>Name <span class="req">*</span></span>' +
+      '<input name="borrowerName" list="borrowerList" required value="' + esc(D.borrowerName) + '" placeholder="First and last name"></label>' +
+      '<label class="field"><span>Email <span class="req">*</span> <span class="hint">— the receipt goes here</span></span>' +
+      '<input name="borrowerEmail" type="email" inputmode="email" required value="' + esc(D.borrowerEmail) + '" placeholder="name@school.edu"></label>' +
+      '<div class="grid-2"><label class="field"><span>Phone</span><input name="borrowerPhone" type="tel" value="' + esc(D.borrowerPhone) + '"></label>' +
+      '<label class="field"><span>Class, group, or ID</span><input name="borrowerGroup" value="' + esc(D.borrowerGroup) + '" placeholder="e.g. FILM 210"></label></div>' +
+      '<datalist id="borrowerList">' + borrowers.map(function (r) { return '<option value="' + esc(r.borrowerName) + '">' + esc(r.borrowerEmail) + '</option>'; }).join('') + '</datalist>' +
+      '</section>' +
+
+      '<section class="panel checkout__gear"><h2 class="panel__title"><span class="step">2</span>What are they taking?</h2>' +
+      '<div class="toolbar"><label class="search"><span class="sr-only">Search gear</span>' + ICON.search +
+      '<input type="search" id="pickQ" placeholder="Search gear or asset tag" value="' + esc(D.q) + '"></label>' +
+      '<select id="pickCat" aria-label="Category"><option value="">All categories</option>' +
+      cats.map(function (c) { return '<option' + (c === D.cat ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') + '</select></div>' +
+      '<div class="picker" id="picker"></div>' +
+      '<div class="cart" id="cart"></div>' +
+      '</section>' +
+
+      '<section class="panel checkout__loan"><h2 class="panel__title"><span class="step">3</span>Loan details</h2>' +
+      '<label class="field"><span>Due back <span class="req">*</span></span><input name="dueAt" type="datetime-local" required value="' + esc(D.dueAt) + '"></label>' +
+      '<div class="quick" role="group" aria-label="Quick due dates">' + quick.map(function (q) {
+        return '<button type="button" data-quick="' + q[0] + '">' + q[1] + '</button>';
+      }).join('') + '</div>' +
+      staffField('coStaff', 'Checked out by') +
+      '<label class="field"><span>Notes</span><textarea name="notes" placeholder="Project, condition at checkout, anything to remember">' + esc(D.notes) + '</textarea></label>' +
+      '<label class="check"><input type="checkbox" name="sendEmail"' + (D.sendEmail ? ' checked' : '') + '> <span>Email the borrower a checkout summary with the due date</span></label>' +
+      '<div class="summary"><span id="cartSummary" class="muted"></span>' +
+      '<button class="btn btn--primary btn--lg" type="submit" id="coSubmit">' + ICON.check + 'Check out</button></div>' +
+      '</section>' +
+      '</form>';
+  }
+
+  function inCart(id) { return S.draft.lines[id] || 0; }
+
+  function renderPicker() {
+    var box = $('#picker');
+    if (!box) return;
+    var D = S.draft, q = norm(D.q).trim();
+    var list = S.items.filter(function (i) {
+      if (i.archived) return false;
+      if (D.cat && i.category !== D.cat) return false;
+      if (q && norm([i.name, i.assetTag, i.serial, i.category, i.location].join(' ')).indexOf(q) === -1) return false;
+      return true;
+    }).sort(function (a, b) {
+      if ((a.available > 0) !== (b.available > 0)) return a.available > 0 ? -1 : 1;
+      return byName(a, b);
+    });
+    if (!S.items.some(function (i) { return !i.archived; })) {
+      box.innerHTML = '<div class="cart__empty">No gear in the inventory yet. <a href="#" data-go="inventory">Add some</a> first.</div>';
+      return;
+    }
+    if (!list.length) { box.innerHTML = '<div class="cart__empty">No gear matches that search.</div>'; return; }
+    box.innerHTML = list.slice(0, 80).map(function (i) {
+      var left = i.available - inCart(i.id);
+      var meta = [i.assetTag, i.category, i.location].filter(String).join(' · ');
+      return '<div class="pick' + (i.available ? '' : ' is-none') + '">' +
+        '<div class="pick__body"><div class="pick__name">' + esc(i.name) + '</div>' +
+        '<div class="pick__meta">' + esc(meta) + (meta ? ' · ' : '') +
+        (i.available ? i.available + ' of ' + i.totalQty + ' free' : 'all ' + (i.totalQty ? 'out' : 'gone')) +
+        (inCart(i.id) ? ' · <b>' + inCart(i.id) + ' added</b>' : '') + '</div></div>' +
+        '<button type="button" class="icon-btn" data-act="add" data-id="' + esc(i.id) + '"' + (left > 0 ? '' : ' disabled') +
+        ' aria-label="Add ' + esc(i.name) + '">' + ICON.plus + '</button></div>';
+    }).join('') + (list.length > 80 ? '<div class="pick muted small">Showing 80 of ' + list.length + ' — search to narrow it down.</div>' : '');
+  }
+
+  function renderCart() {
+    var box = $('#cart');
+    if (!box) return;
+    var D = S.draft;
+    D.order = D.order.filter(function (id) { return D.lines[id] > 0 && findItem(id); });
+    var count = 0;
+    if (!D.order.length) {
+      box.innerHTML = '<div class="cart__empty">Nothing added yet. Tap <b>+</b> next to the gear they’re taking.</div>';
+    } else {
+      box.innerHTML = '<h2 class="section" style="margin-top:4px">In this checkout</h2>' + D.order.map(function (id) {
+        var it = findItem(id), n = D.lines[id];
+        count += n;
+        var over = n > it.available;
+        return '<div class="line"><div class="line__body"><div class="line__name">' + esc(it.name) + '</div>' +
+          '<div class="small ' + (over ? '' : 'muted') + '" style="' + (over ? 'color:var(--bad-fg)' : '') + '">' +
+          (over ? 'Only ' + it.available + ' available now' : esc(it.assetTag || it.category || '')) + '</div></div>' +
+          '<div class="stepper"><button type="button" class="icon-btn" data-act="dec" data-id="' + esc(id) + '" aria-label="One fewer">' + ICON.minus + '</button>' +
+          '<output aria-live="polite">' + n + '</output>' +
+          '<button type="button" class="icon-btn" data-act="inc" data-id="' + esc(id) + '" aria-label="One more"' + (n >= it.available ? ' disabled' : '') + '>' + ICON.plus + '</button></div>' +
+          '<button type="button" class="icon-btn" data-act="rm" data-id="' + esc(id) + '" aria-label="Remove">' + ICON.x + '</button></div>';
+      }).join('');
+    }
+    var sum = $('#cartSummary');
+    if (sum) sum.textContent = count ? plural(count, 'piece') + ' of gear' : 'No gear added yet';
+    var btn = $('#coSubmit');
+    if (btn && !btn.disabled) btn.innerHTML = ICON.check + (count ? 'Check out ' + plural(count, 'item') : 'Check out');
+  }
+
+  function readDraftForm() {
+    var f = $('#coForm');
+    if (!f) return;
+    var D = S.draft;
+    ['borrowerName', 'borrowerEmail', 'borrowerPhone', 'borrowerGroup', 'dueAt', 'notes'].forEach(function (k) { D[k] = f.elements[k].value; });
+    D.sendEmail = f.elements.sendEmail.checked;
+  }
+
+  function submitCheckout(btn) {
+    readDraftForm();
+    var D = S.draft;
+    var staff = ($('#coStaff') || {}).value || '';
+    var lines = D.order.map(function (id) { return { itemId: id, qty: D.lines[id] }; });
+    var due = fromLocalInput(D.dueAt);
+    var problem = !D.borrowerName.trim() ? ['borrowerName', 'Enter the borrower’s name.']
+      : !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(D.borrowerEmail.trim()) ? ['borrowerEmail', 'Enter a valid email so they get a receipt.']
+      : !lines.length ? ['pickQ', 'Add at least one piece of gear.']
+      : !due ? ['dueAt', 'Choose when it’s due back.']
+      : !staff.trim() ? ['coStaff', 'Add your name as the person checking it out.'] : null;
+    if (problem) {
+      toast(problem[1], true);
+      var el = $('#coForm').elements[problem[0]] || $('#' + problem[0]);
+      if (el) el.focus();
+      return;
+    }
+    busy(btn, true, 'Checking out…');
+    call('checkout', {
+      borrowerName: D.borrowerName, borrowerEmail: D.borrowerEmail, borrowerPhone: D.borrowerPhone,
+      borrowerGroup: D.borrowerGroup, dueAt: due.toISOString(), notes: D.notes, staff: staff,
+      sendEmail: D.sendEmail, items: lines
+    }).then(function (res) {
+      S.draft = newDraft();
+      S.flash = res.rental.id;
+      var msg = res.rental.id + ' checked out to ' + res.rental.borrowerName;
+      if (res.email) msg += res.email.sent ? ' · summary emailed' : ' · email didn’t send';
+      go('desk');
+      toast(msg, res.email && !res.email.sent);
+      setTimeout(function () { S.flash = ''; }, 2000);
+    }).catch(function (err) {
+      busy(btn, false);
+      toast(err.message, true);
+      renderPicker(); renderCart();
+    });
+  }
+
+  /* ---------- Inventory ---------- */
+
+  function viewInventory() {
+    var live = S.items.filter(function (i) { return !i.archived; });
+    var sum = function (k) { return live.reduce(function (n, i) { return n + (i[k] || 0); }, 0); };
+    var cats = categories();
+    var filters = [['all', 'All'], ['available', 'Available'], ['out', 'Checked out'], ['oos', 'Out of service'], ['archived', 'Archived']];
+    return '<div class="page-head"><div><p class="eyebrow">Everything we lend</p><h1 class="display">Inventory</h1></div>' +
+      '<div class="page-head__actions">' +
+      (S.sheetUrl ? '<a class="btn btn--ghost" href="' + esc(S.sheetUrl) + '" target="_blank" rel="noopener">' + ICON.ext + 'Open spreadsheet</a>' : '') +
+      '<button class="btn btn--primary" data-act="newItem">' + ICON.plus + 'Add item</button></div></div>' +
+      '<div class="inv-summary"><span><b>' + live.length + '</b> items</span><span><b>' + sum('totalQty') + '</b> pieces owned</span>' +
+      '<span><b>' + sum('checkedOut') + '</b> out now</span><span><b>' + sum('outOfService') + '</b> out of service</span>' +
+      '<span><b>' + sum('available') + '</b> on the shelf</span></div>' +
+      '<div class="toolbar"><label class="search"><span class="sr-only">Search inventory</span>' + ICON.search +
+      '<input type="search" data-q="inv" placeholder="Search name, tag, serial, location" value="' + esc(S.q.inv) + '"></label>' +
+      '<select data-q="invCat" aria-label="Category"><option value="">All categories</option>' +
+      cats.map(function (c) { return '<option' + (c === S.q.invCat ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') + '</select>' +
+      '<div class="seg" role="group" aria-label="Show">' + filters.map(function (f) {
+        return '<button type="button" data-filter="invFilter" data-value="' + f[0] + '" aria-pressed="' + (S.q.invFilter === f[0]) + '">' + f[1] + '</button>';
+      }).join('') + '</div></div>' +
+      '<div id="invList"></div>';
+  }
+
+  function renderInvList() {
+    var box = $('#invList');
+    if (!box) return;
+    if (!S.items.length) {
+      box.innerHTML = '<div class="empty"><img src="' + esc(BADGE) + '" alt=""><h3>No gear yet</h3>' +
+        '<p>Add each kind of item once and set how many you own. Have a list already? Paste it into the Inventory tab of the spreadsheet (name, category, totalQty) and refresh.</p>' +
+        '<button class="btn btn--primary" data-act="newItem">' + ICON.plus + 'Add your first item</button></div>';
+      return;
+    }
+    var q = norm(S.q.inv).trim(), f = S.q.invFilter;
+    var list = S.items.filter(function (i) {
+      if (f === 'archived' ? !i.archived : i.archived) return false;
+      if (f === 'available' && !(i.available > 0)) return false;
+      if (f === 'out' && !(i.checkedOut > 0)) return false;
+      if (f === 'oos' && !(i.outOfService > 0)) return false;
+      if (S.q.invCat && i.category !== S.q.invCat) return false;
+      if (q && norm([i.name, i.assetTag, i.serial, i.category, i.location, i.notes].join(' ')).indexOf(q) === -1) return false;
+      return true;
+    }).sort(byName);
+    if (!list.length) { box.innerHTML = '<div class="empty"><h3>Nothing here</h3><p>No items match these filters.</p></div>'; return; }
+    box.innerHTML = '<div class="table-wrap"><table class="data"><thead><tr><th>Item</th><th class="hide-sm">Category</th>' +
+      '<th class="num hide-sm">Owned</th><th class="num hide-sm">Out</th><th class="num hide-sm">Repair</th><th class="num">Status</th></tr></thead><tbody>' +
+      list.map(function (i) {
+        var sub = [i.assetTag && 'Tag ' + i.assetTag, i.serial && 'S/N ' + i.serial, i.location].filter(Boolean).join(' · ');
+        return '<tr data-act="item" data-id="' + esc(i.id) + '" tabindex="0"' + (i.archived ? ' class="is-archived"' : '') + '>' +
+          '<td class="wide"><div class="item-name">' + esc(i.name) + '</div>' + (sub ? '<div class="sub">' + esc(sub) + '</div>' : '') +
+          '<div class="sub show-sm">' + esc([i.category, i.totalQty + ' owned', i.checkedOut + ' out', i.outOfService ? i.outOfService + ' in repair' : ''].filter(Boolean).join(' · ')) + '</div></td>' +
+          '<td class="hide-sm">' + (i.category ? '<span class="pill pill--tag pill--plain">' + esc(i.category) + '</span>' : '<span class="muted">—</span>') + '</td>' +
+          '<td class="num hide-sm">' + i.totalQty + '</td>' +
+          '<td class="num hide-sm">' + (i.checkedOut || '<span class="muted">0</span>') + '</td>' +
+          '<td class="num hide-sm">' + (i.outOfService || '<span class="muted">0</span>') + '</td>' +
+          '<td class="num end">' + availPill(i) + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+
+  function openItem(id) {
+    var it = id ? findItem(id) : null;
+    var v = it || { name: '', category: '', assetTag: '', serial: '', totalQty: 1, outOfService: 0, location: '', notes: '' };
+    var holders = it ? activeRentals().filter(function (r) {
+      return r.items.some(function (l) { return l.itemId === it.id && l.returned < l.qty; });
+    }) : [];
+    openModal(
+      '<p class="eyebrow">' + (it ? 'Edit item' : 'New item') + '</p><h2 id="modalTitle">' + (it ? esc(it.name) : 'Add gear to the inventory') + '</h2>' +
+      (it ? '<p>' + esc([it.assetTag && 'Tag ' + it.assetTag, plural(it.available, 'piece') + ' on the shelf'].filter(Boolean).join(' · ')) + '</p>' : ''),
+      (holders.length ? '<div class="callout callout--info"><b>Out right now:</b> ' + holders.map(function (r) {
+        var n = r.items.filter(function (l) { return l.itemId === it.id; }).reduce(function (s, l) { return s + l.qty - l.returned; }, 0);
+        return esc(n + '× with ' + r.borrowerName + ' (' + r.id + ', due ' + fmtDay(new Date(r.dueAt)) + ')');
+      }).join('; ') + '</div>' : '') +
+      '<form id="itemForm" novalidate autocomplete="off">' +
+      '<label class="field"><span>Name <span class="req">*</span></span><input name="name" required value="' + esc(v.name) + '" placeholder="e.g. Canon EOS R6 kit"></label>' +
+      '<div class="grid-2"><label class="field"><span>Category</span><input name="category" list="catList" value="' + esc(v.category) + '"></label>' +
+      '<label class="field"><span>Location</span><input name="location" value="' + esc(v.location) + '" placeholder="Shelf, cabinet, room"></label></div>' +
+      '<datalist id="catList">' + categories().map(function (c) { return '<option value="' + esc(c) + '">'; }).join('') + '</datalist>' +
+      '<div class="grid-2"><label class="field"><span>Asset tag</span><input name="assetTag" value="' + esc(v.assetTag) + '"></label>' +
+      '<label class="field"><span>Serial number</span><input name="serial" value="' + esc(v.serial) + '"></label></div>' +
+      '<div class="grid-2"><label class="field"><span>How many we own <span class="req">*</span></span><input name="totalQty" type="number" min="0" step="1" inputmode="numeric" value="' + esc(v.totalQty) + '"></label>' +
+      '<label class="field"><span>Out of service <span class="hint">— broken / in repair</span></span><input name="outOfService" type="number" min="0" step="1" inputmode="numeric" value="' + esc(v.outOfService) + '"></label></div>' +
+      '<label class="field"><span>Notes</span><textarea name="notes" placeholder="What’s in the kit, quirks, repair history">' + esc(v.notes) + '</textarea></label>' +
+      '</form>',
+      (it ? '<button class="btn btn--quiet" data-act="archive" data-id="' + esc(it.id) + '" data-archived="' + (!it.archived) + '">' + (it.archived ? 'Restore item' : 'Archive item') + '</button><span class="spacer"></span>' : '') +
+      '<button class="btn btn--ghost" data-act="close">Cancel</button>' +
+      '<button class="btn btn--primary" data-act="saveItem" data-id="' + esc(it ? it.id : '') + '">' + ICON.check + (it ? 'Save changes' : 'Add item') + '</button>'
+    );
+    setTimeout(function () { var n = $('#itemForm [name=name]'); if (n && !it) n.focus(); }, 50);
+  }
+
+  function saveItem(btn) {
+    var f = $('#itemForm');
+    var item = { id: btn.dataset.id || '' };
+    ['name', 'category', 'location', 'assetTag', 'serial', 'totalQty', 'outOfService', 'notes'].forEach(function (k) { item[k] = f.elements[k].value; });
+    if (!item.name.trim()) { toast('Give the item a name.', true); f.elements.name.focus(); return; }
+    busy(btn, true);
+    call('saveItem', { item: item, staff: S.staff }).then(function (res) {
+      closeModal();
+      render();
+      toast(item.id ? 'Saved ' + res.item.name : 'Added ' + res.item.name + ' to the inventory');
+    }).catch(function (err) { busy(btn, false); toast(err.message, true); });
+  }
+
+  /* ---------- History ---------- */
+
+  function viewHistory() {
+    var filters = [['all', 'All'], ['open', 'Open'], ['overdue', 'Overdue'], ['returned', 'Returned'], ['cancelled', 'Cancelled']];
+    return '<div class="page-head"><div><p class="eyebrow">Every loan</p><h1 class="display">History</h1></div>' +
+      (S.sheetUrl ? '<div class="page-head__actions"><a class="btn btn--ghost" href="' + esc(S.sheetUrl) + '" target="_blank" rel="noopener">' + ICON.ext + 'Full log in the spreadsheet</a></div>' : '') +
+      '</div>' +
+      '<div class="toolbar"><label class="search"><span class="sr-only">Search history</span>' + ICON.search +
+      '<input type="search" data-q="hist" placeholder="Search by borrower, gear, or rental #" value="' + esc(S.q.hist) + '"></label>' +
+      '<div class="seg" role="group" aria-label="Show">' + filters.map(function (f) {
+        return '<button type="button" data-filter="histFilter" data-value="' + f[0] + '" aria-pressed="' + (S.q.histFilter === f[0]) + '">' + f[1] + '</button>';
+      }).join('') + '</div></div><div id="histList"></div>';
+  }
+
+  function renderHistList() {
+    var box = $('#histList');
+    if (!box) return;
+    var f = S.q.histFilter;
+    var list = S.rentals.filter(function (r) {
+      if (f === 'open' && !isActive(r)) return false;
+      if (f === 'overdue' && !isOverdue(r)) return false;
+      if (f === 'returned' && r.status !== 'Returned') return false;
+      if (f === 'cancelled' && r.status !== 'Cancelled') return false;
+      return rentalMatches(r, S.q.hist);
+    }).sort(function (a, b) { return new Date(b.checkedOutAt) - new Date(a.checkedOutAt); });
+    if (!list.length) {
+      box.innerHTML = '<div class="empty"><img src="' + esc(BADGE) + '" alt=""><h3>' + (S.rentals.length ? 'No matches' : 'No loans yet') + '</h3><p>' +
+        (S.rentals.length ? 'Try a different search or filter.' : 'Every checkout will be listed here, with its return and receipt.') + '</p></div>';
+      return;
+    }
+    var shown = list.slice(0, 250);
+    box.innerHTML = '<div class="table-wrap"><table class="data"><thead><tr><th>Loan</th><th class="hide-sm">Gear</th><th class="hide-sm">Out</th><th class="hide-sm">Back</th><th class="num">Status</th></tr></thead><tbody>' +
+      shown.map(function (r) {
+        var gear = r.items.map(function (l) { return l.qty + '× ' + l.name; }).join(', ');
+        return '<tr data-act="details" data-id="' + esc(r.id) + '" tabindex="0">' +
+          '<td class="wide"><div class="item-name">' + esc(r.borrowerName) + '</div><div class="sub"><span class="rid">' + esc(r.id) + '</span>' +
+          (r.borrowerGroup ? ' · ' + esc(r.borrowerGroup) : '') + '</div><div class="sub show-sm">' + esc(gear) + '</div>' +
+          '<div class="sub show-sm">Out ' + esc(fmtWhen(r.checkedOutAt)) + (r.returnedAt ? ' · back ' + esc(fmtWhen(r.returnedAt)) : '') + '</div></td>' +
+          '<td class="hide-sm" style="max-width:340px">' + esc(gear) + '</td>' +
+          '<td class="hide-sm" style="white-space:nowrap">' + esc(fmtWhen(r.checkedOutAt)) + '<div class="sub">by ' + esc(r.checkedOutBy) + '</div></td>' +
+          '<td class="hide-sm" style="white-space:nowrap">' + (r.returnedAt ? esc(fmtWhen(r.returnedAt)) + '<div class="sub">by ' + esc(r.returnedBy) + '</div>'
+            : isActive(r) ? '<span class="sub">due ' + esc(fmtWhen(r.dueAt)) + '</span>' : '<span class="muted">—</span>') + '</td>' +
+          '<td class="num end">' + statusPill(r) + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      (list.length > shown.length ? '<p class="muted small">Showing the latest ' + shown.length + ' of ' + list.length + '. Search to find older loans.</p>' : '');
+  }
+
+  /* ---------- Settings ---------- */
+
+  function viewSettings() {
+    var s = S.settings;
+    var hours = '';
+    for (var h = 6; h <= 23; h++) {
+      var label = new Date(2000, 0, 1, h).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      hours += '<option value="' + h + '"' + (Number(s.dueHour) === h ? ' selected' : '') + '>' + label + '</option>';
+    }
+    return '<div class="page-head"><div><p class="eyebrow">How the desk works</p><h1 class="display">Settings</h1></div></div>' +
+      '<form id="setForm" novalidate autocomplete="off"><div class="settings-grid">' +
+      '<div><section class="panel"><h2 class="panel__title">Desk team</h2><p class="help">Names offered when someone checks gear in or out. One per line.</p>' +
+      '<label class="field"><span class="sr-only">Staff names</span><textarea name="staff" rows="5" placeholder="Hank&#10;Jules">' + esc((s.staff || []).join('\n')) + '</textarea></label></section>' +
+      '<section class="panel"><h2 class="panel__title">Loans</h2>' +
+      '<div class="grid-2"><label class="field"><span>Default loan length (days)</span><input name="defaultLoanDays" type="number" min="0" max="365" value="' + esc(s.defaultLoanDays) + '"></label>' +
+      '<label class="field"><span>Gear is due back at</span><select name="dueHour">' + hours + '</select></label></div>' +
+      '<label class="field"><span>Gear categories <span class="hint">— one per line</span></span><textarea name="categories" rows="6">' + esc((s.categories || []).join('\n')) + '</textarea></label></section></div>' +
+
+      '<div><section class="panel"><h2 class="panel__title">Receipts &amp; emails</h2>' +
+      '<p class="help">Emails come from the Google account that runs Gear Desk' + (S.emailQuota >= 0 ? ' (' + S.emailQuota + ' left today)' : '') + '.</p>' +
+      '<label class="field"><span>Replies go to</span><input name="replyTo" type="email" value="' + esc(s.replyTo) + '" placeholder="studio@school.edu"></label>' +
+      '<label class="field"><span>Send a copy to <span class="hint">— optional, separate with commas</span></span><input name="receiptCc" value="' + esc(s.receiptCc) + '" placeholder="team@school.edu"></label>' +
+      '<label class="field"><span>Contact line</span><input name="contactLine" value="' + esc(s.contactLine) + '" placeholder="Library, Room 210 · Mon–Fri 9–5"></label>' +
+      '<label class="field"><span>Receipt message</span><textarea name="receiptFooter" rows="3">' + esc(s.receiptFooter) + '</textarea></label>' +
+      '<label class="check"><input type="checkbox" name="checkoutEmail"' + (s.checkoutEmail ? ' checked' : '') + '> <span>Email a checkout summary by default</span></label></section>' +
+      '<section class="panel"><h2 class="panel__title">About this desk</h2><dl class="kv">' +
+      (S.me ? '<dt>Signed in as</dt><dd>' + esc(S.me) + '</dd>' : '') +
+      '<dt>Data</dt><dd>' + (S.sheetUrl ? '<a href="' + esc(S.sheetUrl) + '" target="_blank" rel="noopener">The Studio — Gear Tracker</a>' : '—') + '</dd>' +
+      '<dt>This device</dt><dd>' + (S.staff ? 'Working as ' + esc(S.staff) : 'No name saved yet') + '</dd></dl></section></div>' +
+      '</div><div class="summary" style="border:0"><span></span><button class="btn btn--primary btn--lg" type="submit" id="setSubmit">' + ICON.check + 'Save settings</button></div></form>';
+  }
+
+  function saveSettings(btn) {
+    var f = $('#setForm');
+    var s = {};
+    ['staff', 'categories', 'replyTo', 'receiptCc', 'contactLine', 'receiptFooter', 'defaultLoanDays', 'dueHour'].forEach(function (k) { s[k] = f.elements[k].value; });
+    s.checkoutEmail = f.elements.checkoutEmail.checked;
+    busy(btn, true);
+    call('saveSettings', { settings: s }).then(function (res) {
+      S.settings = res.settings;
+      busy(btn, false);
+      render();
+      toast('Settings saved');
+    }).catch(function (err) { busy(btn, false); toast(err.message, true); });
+  }
+
+  /* ------------------------------------------------------------ */
+  /* Dialogs                                                       */
+  /* ------------------------------------------------------------ */
+
+  function openModal(head, body, foot) {
+    modal.innerHTML = '<div class="modal__head">' + head +
+      '<button class="modal__close" data-act="close" aria-label="Close">' + ICON.x + '</button></div>' +
+      '<div class="modal__body">' + body + staffOptions() + '</div>' +
+      (foot ? '<div class="modal__foot">' + foot + '</div>' : '');
+    if (!modal.open) {
+      if (modal.showModal) modal.showModal(); else modal.setAttribute('open', '');
+    }
+    modal.querySelector('.modal__body').scrollTop = 0;
+  }
+
+  function closeModal() {
+    if (modal.open) { if (modal.close) modal.close(); else modal.removeAttribute('open'); }
+  }
+
+  modal.addEventListener('click', function (e) { if (e.target === modal) closeModal(); });
+  modal.addEventListener('close', function () { modal.innerHTML = ''; });
+
+  /* ---------- Confirm return ---------- */
+
+  var RET = null;
+
+  function openReturn(id) {
+    var r = findRental(id);
+    if (!r || !isActive(r)) { toast('That loan is already closed.', true); return; }
+    RET = { id: id, lines: {} };
+    outstanding(r).forEach(function (l) { RET.lines[l.itemId] = { qty: l.qty - l.returned, condition: 'Good', note: '' }; });
+    renderReturn();
+  }
+
+  function conditionEffect(cond, n) {
+    if (cond === 'Damaged') return 'Moves ' + n + ' to out of service until it’s fixed.';
+    if (cond === 'Lost') return 'Removes ' + n + ' from the inventory count.';
+    if (cond === 'Needs attention') return 'Goes back on the shelf; note it below so the next person knows.';
+    return '';
+  }
+
+  function renderReturn() {
+    var r = findRental(RET.id);
+    var od = isOverdue(r);
+    var cc = (S.settings.receiptCc || '').trim();
+    var lines = outstanding(r).map(function (l) {
+      var st = RET.lines[l.itemId], max = l.qty - l.returned;
+      var opts = S.conditions.map(function (c) {
+        return '<option value="' + esc(c.name) + '"' + (c.name === st.condition ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+      }).join('');
+      var effect = st.qty ? conditionEffect(st.condition, st.qty) : '';
+      return '<div class="ret-line' + (st.qty ? '' : ' is-skipped') + '" data-item="' + esc(l.itemId) + '">' +
+        '<div class="ret-line__top"><div class="ret-line__name">' + esc(l.name) +
+        (l.assetTag ? ' <span class="muted small">· ' + esc(l.assetTag) + '</span>' : '') + '</div>' +
+        '<span class="muted small">' + max + ' still out</span></div>' +
+        '<div class="ret-line__controls"><span class="label">Back:</span><div class="stepper">' +
+        '<button type="button" class="icon-btn" data-act="rdec" data-id="' + esc(l.itemId) + '" aria-label="One fewer back"' + (st.qty ? '' : ' disabled') + '>' + ICON.minus + '</button>' +
+        '<output>' + st.qty + '</output>' +
+        '<button type="button" class="icon-btn" data-act="rinc" data-id="' + esc(l.itemId) + '" aria-label="One more back"' + (st.qty >= max ? ' disabled' : '') + '>' + ICON.plus + '</button></div>' +
+        '<label><span class="sr-only">Condition</span><select data-cond="' + esc(l.itemId) + '"' + (st.qty ? '' : ' disabled') + '>' + opts + '</select></label></div>' +
+        (effect ? '<div class="ret-line__effect ' + (st.condition === 'Good' ? 'muted' : '') + '" style="' + (st.condition === 'Damaged' || st.condition === 'Lost' ? 'color:var(--bad-fg)' : '') + '">' + esc(effect) + '</div>' : '') +
+        (st.qty && st.condition !== 'Good' ? '<input class="input note-input" data-note="' + esc(l.itemId) + '" placeholder="What happened? (saved on the item’s notes)" value="' + esc(st.note) + '">' : '') +
+        '</div>';
+    }).join('');
+    var count = Object.keys(RET.lines).reduce(function (n, k) { return n + RET.lines[k].qty; }, 0);
+    var all = outstanding(r).every(function (l) { return RET.lines[l.itemId].qty === l.qty - l.returned; });
+
+    var prev = { notes: ($('#retNotes') || {}).value, staff: ($('#retStaff') || {}).value, send: $('#retSend') ? $('#retSend').checked : true };
+    openModal(
+      '<p class="eyebrow">Confirm return</p><h2 id="modalTitle">' + esc(r.borrowerName) + '</h2>' +
+      '<p>' + esc(r.id) + ' · out ' + esc(fmtWhen(r.checkedOutAt)) + ' · due ' + esc(fmtWhen(r.dueAt)) + '</p>',
+      (od ? '<div class="callout callout--warn">This loan is <b>' + esc(overdueText(r)) + '</b>. It was due ' + esc(fmtFull(r.dueAt)) + '.</div>' : '') +
+      '<div class="toolbar" style="justify-content:space-between;margin-bottom:10px"><span class="label">What came back?</span>' +
+      '<span><button type="button" class="btn btn--quiet btn--sm" data-act="rall">All of it</button>' +
+      '<button type="button" class="btn btn--quiet btn--sm" data-act="rnone">Clear</button></span></div>' +
+      lines +
+      '<label class="field" style="margin-top:16px"><span>Note for the receipt <span class="hint">— optional, the borrower sees this</span></span>' +
+      '<textarea id="retNotes" rows="2" placeholder="e.g. Thanks for charging the batteries!">' + esc(prev.notes || '') + '</textarea></label>' +
+      staffField('retStaff', 'Checked in by') +
+      '<label class="check"><input type="checkbox" id="retSend"' + (prev.send ? ' checked' : '') + '> <span>Email a receipt to <b>' + esc(r.borrowerEmail) + '</b>' +
+      (cc ? ' <span class="muted">(copy to ' + esc(cc) + ')</span>' : '') + '</span></label>',
+      '<button class="btn btn--ghost" data-act="close">Cancel</button>' +
+      '<button class="btn btn--primary" data-act="confirmReturn"' + (count ? '' : ' disabled') + '>' + ICON.check +
+      (count ? (all ? 'Confirm return' : 'Confirm ' + plural(count, 'item') + ' back') : 'Choose what came back') + '</button>'
+    );
+    if (prev.staff !== undefined && $('#retStaff')) $('#retStaff').value = prev.staff;
+  }
+
+  function submitReturn(btn) {
+    var r = findRental(RET.id);
+    var staff = $('#retStaff').value.trim();
+    if (!staff) { toast('Add your name as the person checking it in.', true); $('#retStaff').focus(); return; }
+    var send = $('#retSend').checked;
+    var lines = Object.keys(RET.lines).map(function (id) {
+      var st = RET.lines[id];
+      return { itemId: id, qty: st.qty, condition: st.condition, note: st.note };
+    }).filter(function (l) { return l.qty > 0; });
+    busy(btn, true, send ? 'Confirming & emailing…' : 'Confirming…');
+    call('confirmReturn', { id: r.id, staff: staff, notes: $('#retNotes').value, sendReceipt: send, lines: lines })
+      .then(function (res) { render(); showReturnDone(res); })
+      .catch(function (err) { busy(btn, false); toast(err.message, true); });
+  }
+
+  function showReturnDone(res) {
+    var r = res.rental;
+    var left = outstanding(r);
+    var mail = res.email;
+    var mailHtml = !mail ? '<p class="muted">No receipt emailed.</p>'
+      : mail.sent ? '<p><span class="pill pill--ok">' + ICON.mail.replace('<svg', '<svg width="14" height="14" style="stroke:currentColor;fill:none;stroke-width:2"') + ' Receipt emailed</span></p><p class="muted small">Sent to ' + esc(mail.to) + (mail.cc && mail.cc.length ? ', copy to ' + esc(mail.cc.join(', ')) : '') + '</p>'
+      : '<div class="callout callout--bad" style="text-align:left"><b>The receipt didn’t send.</b> ' + esc(mail.error) + ' The return is saved — you can try the email again.</div>';
+    openModal(
+      '<p class="eyebrow">' + esc(r.id) + '</p><h2 id="modalTitle">' + esc(r.borrowerName) + '</h2>',
+      '<div class="done"><div class="done__icon">' + ICON.check + '</div>' +
+      '<h3>' + (left.length ? 'Partly checked in' : 'Return confirmed') + '</h3>' +
+      '<p>' + (left.length ? 'Still out: ' + esc(left.map(function (l) { return (l.qty - l.returned) + '× ' + l.name; }).join(', ')) + '.'
+        : 'Everything is back and the inventory is updated.') + '</p>' + mailHtml + '</div>',
+      (mail && !mail.sent ? '<button class="btn btn--ghost" data-act="resend" data-id="' + esc(r.id) + '">' + ICON.mail + 'Try the email again</button>' : '') +
+      '<button class="btn btn--primary" data-act="close">Done</button>'
+    );
+  }
+
+  /* ---------- Loan details ---------- */
+
+  function openDetails(id) {
+    var r = findRental(id);
+    if (!r) return;
+    var act = isActive(r);
+    var lines = r.items.map(function (l) {
+      return '<tr><td><div class="item-name">' + esc(l.name) + '</div>' + (l.assetTag ? '<div class="sub">' + esc(l.assetTag) + '</div>' : '') + '</td>' +
+        '<td class="num">' + l.returned + ' / ' + l.qty + ' back</td>' +
+        '<td class="num">' + (l.condition ? '<span class="pill ' + (l.condition === 'Good' ? 'pill--ok' : l.condition === 'Needs attention' ? 'pill--warn' : 'pill--bad') + ' pill--plain">' + esc(l.condition) + '</span>' : '') + '</td></tr>';
+    }).join('');
+    var timeline = '<li><b>Checked out</b> by ' + esc(r.checkedOutBy) + '<time>' + esc(fmtFull(r.checkedOutAt)) + '</time></li>' +
+      r.returns.map(function (ev) {
+        return '<li class="is-return"><b>' + plural(ev.lines.reduce(function (n, l) { return n + l.qty; }, 0), 'item') + ' returned</b> to ' + esc(ev.by) +
+          '<time>' + esc(fmtFull(ev.at)) + '</time><span class="small muted">' + esc(ev.lines.map(function (l) { return l.qty + '× ' + l.name + ' (' + l.condition + ')'; }).join(', ')) + '</span>' +
+          (ev.notes ? '<div class="small">“' + esc(ev.notes) + '”</div>' : '') + '</li>';
+      }).join('') +
+      (r.status === 'Cancelled' ? '<li><b>Cancelled</b></li>' : '');
+    var receipt = r.receiptSentAt ? '<span class="pill pill--ok pill--plain">Sent ' + esc(fmtWhen(r.receiptSentAt)) + '</span>'
+      : r.returns.length ? '<span class="pill pill--muted pill--plain">Not sent</span>' : '<span class="muted">After the return</span>';
+    var canCancel = r.status === 'Out' && !r.returns.length;
+
+    openModal(
+      '<p class="eyebrow">' + esc(r.id) + ' · ' + esc(isOverdue(r) ? 'Overdue' : r.status) + '</p><h2 id="modalTitle">' + esc(r.borrowerName) + '</h2>' +
+      '<p>' + esc([r.borrowerEmail, r.borrowerPhone, r.borrowerGroup].filter(Boolean).join(' · ')) + '</p>',
+      (r.lastEmailError ? '<div class="callout callout--bad">Last email failed: ' + esc(r.lastEmailError) + '</div>' : '') +
+      '<dl class="kv"><dt>Checked out</dt><dd>' + esc(fmtFull(r.checkedOutAt)) + '</dd>' +
+      '<dt>Due back</dt><dd>' + esc(fmtFull(r.dueAt)) + ' ' + duePill(r) + '</dd>' +
+      (r.returnedAt ? '<dt>Returned</dt><dd>' + esc(fmtFull(r.returnedAt)) + '</dd>' : '') +
+      '<dt>Receipt</dt><dd>' + receipt + '</dd>' +
+      (r.notes ? '<dt>Notes</dt><dd style="white-space:pre-line;font-weight:400">' + esc(r.notes) + '</dd>' : '') + '</dl>' +
+      '<div class="table-wrap" style="box-shadow:none;margin-bottom:18px"><table class="data"><tbody>' + lines + '</tbody></table></div>' +
+      '<h2 class="section">Timeline</h2><ul class="timeline">' + timeline + '</ul>' +
+      (act ? '<details style="margin-top:16px"><summary class="label" style="cursor:pointer">Change due date or contact info</summary>' +
+        '<form id="editForm" style="margin-top:14px" novalidate>' +
+        '<div class="grid-2"><label class="field"><span>Due back</span><input name="dueAt" type="datetime-local" value="' + esc(toLocalInput(new Date(r.dueAt))) + '"></label>' +
+        '<label class="field"><span>Phone</span><input name="borrowerPhone" type="tel" value="' + esc(r.borrowerPhone) + '"></label></div>' +
+        '<label class="field"><span>Email</span><input name="borrowerEmail" type="email" value="' + esc(r.borrowerEmail) + '"></label>' +
+        '<label class="field"><span>Notes</span><textarea name="notes" rows="2">' + esc(r.notes) + '</textarea></label>' +
+        '<button type="button" class="btn btn--ghost" data-act="saveEdit" data-id="' + esc(r.id) + '">Save changes</button></form></details>' : ''),
+      (canCancel ? '<button class="btn btn--quiet" style="color:var(--bad-fg)" data-act="cancelLoan" data-id="' + esc(r.id) + '">Cancel this loan</button>' : '') +
+      '<span class="spacer"></span>' +
+      (r.returns.length ? '<button class="btn btn--ghost" data-act="resend" data-id="' + esc(r.id) + '">' + ICON.mail + 'Resend receipt</button>'
+        : act ? '<button class="btn btn--ghost" data-act="resend" data-id="' + esc(r.id) + '">' + ICON.mail + 'Resend checkout email</button>' : '') +
+      (act ? '<button class="btn btn--primary" data-act="return" data-id="' + esc(r.id) + '">' + ICON.ret + 'Confirm return</button>'
+        : '<button class="btn btn--primary" data-act="close">Close</button>')
+    );
+  }
+
+  function saveEdit(btn) {
+    var f = $('#editForm');
+    var due = fromLocalInput(f.elements.dueAt.value);
+    if (!due) { toast('Choose a valid due date.', true); return; }
+    busy(btn, true);
+    call('updateRental', { id: btn.dataset.id, staff: S.staff, dueAt: due.toISOString(), borrowerEmail: f.elements.borrowerEmail.value,
+      borrowerPhone: f.elements.borrowerPhone.value, notes: f.elements.notes.value })
+      .then(function (res) { render(); openDetails(res.rental.id); toast('Loan updated'); })
+      .catch(function (err) { busy(btn, false); toast(err.message, true); });
+  }
+
+  function cancelLoan(btn) {
+    if (btn.dataset.armed !== '1') {
+      btn.dataset.armed = '1';
+      btn.textContent = 'Tap again to cancel the loan';
+      setTimeout(function () { if (btn.isConnected) { btn.dataset.armed = ''; btn.textContent = 'Cancel this loan'; } }, 4000);
+      return;
+    }
+    busy(btn, true, 'Cancelling…');
+    call('cancelRental', { id: btn.dataset.id, staff: S.staff, reason: 'Cancelled at the desk' })
+      .then(function (res) { closeModal(); render(); toast(res.rental.id + ' cancelled — gear is back on the shelf'); })
+      .catch(function (err) { busy(btn, false); toast(err.message, true); });
+  }
+
+  function resend(btn) {
+    busy(btn, true, 'Sending…');
+    call('resendReceipt', { id: btn.dataset.id, staff: S.staff }).then(function (res) {
+      busy(btn, false);
+      render();
+      if (res.email.sent) { toast('Emailed ' + res.email.to); if (modal.open && $('.done')) closeModal(); }
+      else toast(res.email.error, true);
+    }).catch(function (err) { busy(btn, false); toast(err.message, true); });
+  }
+
+  /* ------------------------------------------------------------ */
+  /* Events                                                        */
+  /* ------------------------------------------------------------ */
+
+  document.addEventListener('click', function (e) {
+    var nav = e.target.closest('[data-go]');
+    if (nav) { e.preventDefault(); if (S.route === 'checkout') readDraftForm(); closeModal(); go(nav.dataset.go); return; }
+
+    var filt = e.target.closest('[data-filter]');
+    if (filt) {
+      S.q[filt.dataset.filter] = filt.dataset.value;
+      $$('[data-filter="' + filt.dataset.filter + '"]').forEach(function (b) { b.setAttribute('aria-pressed', String(b === filt)); });
+      if (S.route === 'inventory') renderInvList(); else renderHistList();
+      return;
+    }
+
+    var q = e.target.closest('[data-quick]');
+    if (q) {
+      var inp = $('#coForm [name=dueAt]');
+      inp.value = toLocalInput(dueAfter(Number(q.dataset.quick)));
+      S.draft.dueAt = inp.value;
+      return;
+    }
+
+    var a = e.target.closest('[data-act]');
+    if (!a) return;
+    var id = a.dataset.id, D = S.draft, it;
+    switch (a.dataset.act) {
+      case 'reload': location.reload(); break;
+      case 'close': closeModal(); break;
+      case 'details': openDetails(id); break;
+      case 'return': openReturn(id); break;
+      case 'item': openItem(id); break;
+      case 'newItem': openItem(null); break;
+      case 'saveItem': saveItem(a); break;
+      case 'archive':
+        busy(a, true);
+        call('setItemArchived', { id: id, archived: a.dataset.archived === 'true', staff: S.staff })
+          .then(function () { closeModal(); render(); toast(a.dataset.archived === 'true' ? 'Item archived' : 'Item restored'); })
+          .catch(function (err) { busy(a, false); toast(err.message, true); });
+        break;
+      case 'add':
+        it = findItem(id);
+        if (!D.lines[id]) D.order.push(id);
+        D.lines[id] = Math.min((D.lines[id] || 0) + 1, it.available);
+        renderPicker(); renderCart();
+        break;
+      case 'inc': it = findItem(id); D.lines[id] = Math.min(D.lines[id] + 1, it.available); renderPicker(); renderCart(); break;
+      case 'dec': D.lines[id] = Math.max(D.lines[id] - 1, 0); renderPicker(); renderCart(); break;
+      case 'rm': D.lines[id] = 0; renderPicker(); renderCart(); break;
+      case 'rinc': case 'rdec': {
+        var r = findRental(RET.id);
+        var l = r.items.filter(function (x) { return x.itemId === id; })[0];
+        var st = RET.lines[id];
+        st.qty = Math.max(0, Math.min(l.qty - l.returned, st.qty + (a.dataset.act === 'rinc' ? 1 : -1)));
+        renderReturn();
+        break;
+      }
+      case 'rall': case 'rnone': {
+        var rr = findRental(RET.id);
+        outstanding(rr).forEach(function (x) { RET.lines[x.itemId].qty = a.dataset.act === 'rall' ? x.qty - x.returned : 0; });
+        renderReturn();
+        break;
+      }
+      case 'confirmReturn': submitReturn(a); break;
+      case 'resend': resend(a); break;
+      case 'saveEdit': saveEdit(a); break;
+      case 'cancelLoan': cancelLoan(a); break;
+    }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('tr[data-act]')) { e.preventDefault(); e.target.click(); }
+  });
+
+  document.addEventListener('input', function (e) {
+    var t = e.target;
+    if (t.dataset.q) {
+      S.q[t.dataset.q] = t.value;
+      if (t.dataset.q === 'desk') renderDeskList();
+      else if (t.dataset.q === 'hist') renderHistList();
+      else renderInvList();
+    } else if (t.id === 'pickQ') {
+      S.draft.q = t.value; renderPicker();
+    } else if (t.dataset.note) {
+      RET.lines[t.dataset.note].note = t.value;
+    }
+    if (t.hasAttribute('data-staff')) { S.staff = t.value.trim(); save('staff', S.staff); }
+  });
+
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (t.id === 'pickCat') { S.draft.cat = t.value; renderPicker(); }
+    else if (t.dataset.cond) { RET.lines[t.dataset.cond].condition = t.value; renderReturn(); }
+    else if (t.name === 'borrowerName' && t.form && t.form.id === 'coForm') {
+      // Returning borrower: fill in the details from their last loan.
+      var past = pastBorrowers().filter(function (r) { return norm(r.borrowerName) === norm(t.value).trim(); })[0];
+      if (past) {
+        var f = t.form;
+        if (!f.elements.borrowerEmail.value) f.elements.borrowerEmail.value = past.borrowerEmail;
+        if (!f.elements.borrowerPhone.value) f.elements.borrowerPhone.value = past.borrowerPhone;
+        if (!f.elements.borrowerGroup.value) f.elements.borrowerGroup.value = past.borrowerGroup;
+      }
+    }
+  });
+
+  document.addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (e.target.id === 'coForm') submitCheckout($('#coSubmit'));
+    if (e.target.id === 'setForm') saveSettings($('#setSubmit'));
+  });
+
+  boot();
+})();
+</script>

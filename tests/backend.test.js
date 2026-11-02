@@ -1,95 +1,143 @@
-// Runs the Apps Script backend against in-memory mocks of Google services: node tests/backend.test.js
-const fs = require('fs'), vm = require('vm');
-// ---- tiny Apps Script mocks ----
-class Range { constructor(sh,r,c,nr,nc){Object.assign(this,{sh,r,c,nr,nc});}
-  getValues(){const o=[];for(let i=0;i<this.nr;i++){const row=[];for(let j=0;j<this.nc;j++){const v=(this.sh.data[this.r-1+i]||[])[this.c-1+j];row.push(v===undefined?'':v);}o.push(row);}return o;}
-  getDisplayValues(){return this.getValues().map(r=>r.map(v=>v instanceof Date?v.toLocaleString():String(v)));}
-  setValues(v){v.forEach((row,i)=>{const t=this.sh.data[this.r-1+i]||(this.sh.data[this.r-1+i]=[]);row.forEach((x,j)=>t[this.c-1+j]=x);});return this;}
-  setFontWeight(){return this;} }
-let sid=100;
-class Sheet { constructor(name,data=[]){this.name=name;this.data=data;this.id=sid++;this.formUrl=null;}
-  getName(){return this.name} setName(n){this.name=n} getSheetId(){return this.id} getFormUrl(){return this.formUrl}
-  getLastRow(){return this.data.length} getLastColumn(){return Math.max(0,...this.data.map(r=>r.length))}
-  getRange(r,c,nr=1,nc=1){return new Range(this,r,c,nr,nc)} setFrozenRows(){}
-  appendRow(row){this.data.push(row)} deleteRow(r){this.data.splice(r-1,1)} }
-const files={};
-class SS { constructor(name){this.name=name;this.id='ss'+Object.keys(files).length+'xxxxxxxxxxxxxxxxxxxxxx';this.sheets=[new Sheet('Sheet1')];files[this.id]=this;}
-  getId(){return this.id} getName(){return this.name} getUrl(){return 'https://docs.google.com/spreadsheets/d/'+this.id}
-  getSheets(){return this.sheets} getSheetByName(n){return this.sheets.find(s=>s.name===n)||null} insertSheet(n){const s=new Sheet(n);this.sheets.push(s);return s;} }
-const forms={};
-const props={};
-const triggers=[];
-const sent=[]; const fetched=[];
-const ctx = {
-  console, JSON, Math, Date, String, Number, Array, Object, Error, isNaN,
-  Logger:{log:m=>console.log('  LOG',m)},
-  PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k]??null,setProperty:(k,v)=>props[k]=String(v),deleteProperty:k=>delete props[k]})},
-  Utilities:{getUuid:()=>require('crypto').randomUUID()},
-  Session:{getEffectiveUser:()=>({getEmail:()=>'me@example.com'})},
-  SpreadsheetApp:{create:n=>new SS(n),openById:id=>{if(!files[id])throw new Error('nf');return files[id];}},
-  FormApp:{openById:id=>{if(!forms[id])throw new Error('nf');return forms[id];}},
-  ScriptApp:{getProjectTriggers:()=>triggers,deleteTrigger:t=>triggers.splice(triggers.indexOf(t),1),
-    newTrigger:fn=>{const t={fn,src:null,uid:'u'+triggers.length};const b={forForm:id=>(t.src=id,b),forSpreadsheet:x=>(t.src=typeof x==='string'?x:x.getId(),b),onFormSubmit:()=>b,timeBased:()=>b,everyMinutes:()=>b,
-      create:()=>{triggers.push({getHandlerFunction:()=>t.fn,getTriggerSourceId:()=>t.src,getUniqueId:()=>t.uid});}};return b;}},
-  LockService:{getScriptLock:()=>({waitLock(){},releaseLock(){}})},
-  MailApp:{sendEmail:o=>sent.push(o),getRemainingDailyQuota:()=>99},
-  UrlFetchApp:{fetch:(u,o)=>{fetched.push([u,JSON.parse(o.payload)]);return{getResponseCode:()=>200,getContentText:()=>''};}},
-  ContentService:{MimeType:{JSON:'json'},createTextOutput:t=>({t,setMimeType(){return JSON.parse(this.t);}})},
-};
-vm.createContext(ctx);
-vm.runInContext(fs.readFileSync(require('path').join(__dirname, '../apps-script/Code.gs'),'utf8'), ctx);
-const call=(action,extra={})=>ctx.doPost({postData:{contents:JSON.stringify({key:props.API_KEY,action,...extra})}});
-const assert=(c,m)=>{if(!c){console.error('FAIL',m);process.exitCode=1;}else console.log('ok',m);};
+// Runs apps-script/Code.gs against in-memory Google services:  node tests/backend.test.js
+const fs = require('fs'), path = require('path'), vm = require('vm');
+const createGasMock = require('./gas-mock');
 
+function boot(opts) {
+  const gas = createGasMock(opts);
+  const ctx = Object.assign({ console, Intl }, gas.globals);
+  vm.createContext(ctx);
+  for (const f of ['Brand.gs', 'Code.gs']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '../apps-script', f), 'utf8'), ctx, { filename: f });
+  }
+  const call = (action, payload) => {
+    const res = ctx.api(action, payload);
+    // google.script.run only passes plain JSON across; make sure nothing else sneaks through.
+    if (JSON.stringify(res) !== JSON.stringify(JSON.parse(JSON.stringify(res)))) throw new Error('non-JSON result');
+    return res;
+  };
+  const ok = (action, payload) => {
+    const res = call(action, payload);
+    if (!res.ok) throw new Error(action + ' failed: ' + res.error);
+    return res.result;
+  };
+  return { gas, ctx, call, ok };
+}
+
+let failures = 0;
+function check(cond, msg) {
+  if (cond) console.log('  ok  ', msg);
+  else { failures++; console.error('  FAIL', msg); }
+}
+const inDays = (d) => new Date(Date.now() + d * 864e5).toISOString();
+
+// ---------------------------------------------------------------------------
+console.log('setup + inventory');
+const { gas, ctx, call, ok } = boot({ user: 'hank@example.edu' });
 ctx.setup();
-assert(triggers.some(t=>t.getHandlerFunction()==='syncAll'),'sync trigger created');
-assert(ctx.doPost({postData:{contents:JSON.stringify({key:'nope',action:'status'})}}).code==='auth','bad key rejected');
+const ss = gas.db();
+check(ss && ss.getSheetByName('Inventory') && ss.getSheetByName('Rentals') && ss.getSheetByName('Activity'), 'spreadsheet created with three tabs');
+check(ok('bootstrap').me === 'hank@example.edu', 'bootstrap returns signed-in user');
 
-// a form with 2 existing responses
-const mkResp=(id,t,ans)=>({getId:()=>id,getTimestamp:()=>new Date(t),getRespondentEmail:()=>'',getItemResponses:()=>ans.map(([q,a])=>({getItem:()=>({getTitle:()=>q}),getResponse:()=>a}))});
-const FID='FORMID_aaaaaaaaaaaaaaaaaaaaaa';
-const fresp=[mkResp('a',1000,[['Name','A'],['Gear',['Tripod','Mic']]]),mkResp('b',2000,[['Name','B'],['Gear',['Cam']]])];
-forms[FID]={getTitle:()=>'Gear Request',getEditUrl:()=>'https://docs.google.com/forms/d/'+FID+'/edit',getResponses:d=>fresp.filter(r=>!d||r.getTimestamp()>=d)};
+const cam = ok('saveItem', { staff: 'Hank', item: { name: 'Canon EOS R6', category: 'Cameras', assetTag: '0012', totalQty: 3 } }).item;
+const mic = ok('saveItem', { staff: 'Hank', item: { name: 'Rode Wireless GO II', category: 'Audio', totalQty: 2 } }).item;
+const tri = ok('saveItem', { staff: 'Hank', item: { name: 'Manfrotto tripod', category: 'Tripods & Support', totalQty: 1 } }).item;
+check(cam.available === 3 && cam.assetTag === '0012', 'item saved, asset tag keeps leading zeros');
+check(/already used/.test(call('saveItem', { item: { name: 'Dup', assetTag: '0012', totalQty: 1 } }).error), 'duplicate asset tag rejected');
+check(/name/.test(call('saveItem', { item: { totalQty: 1 } }).error), 'item needs a name');
 
-assert(/edit mode/.test(call('addSource',{url:'https://docs.google.com/forms/d/e/1FAIpQLSf/viewform'}).error),'viewform link explained');
-let r=call('addSource',{url:'https://docs.google.com/forms/d/'+FID+'/edit'});
-assert(r.ok && r.result.count===2,'form linked, 2 imported '+JSON.stringify(r));
-assert(call('addSource',{url:'https://docs.google.com/forms/d/'+FID+'/edit'}).error.includes('already linked'),'duplicate rejected');
-let list=call('listResponses').result;
-assert(list.total===2 && list.unread===0 && list.items[0].id==='b','imported marked read, newest first');
-assert(list.items[1].data[1][1]==='Tripod, Mic','checkbox answers joined');
+// A row typed straight into the sheet gets picked up and given an id.
+const inv = ss.getSheetByName('Inventory');
+const hdr = inv.data[0];
+const typed = hdr.map(h => ({ name: 'HDMI cable', category: 'Cables & Adapters', totalQty: 10 })[h] ?? '');
+inv.data.push(typed);
+let boot1 = ok('bootstrap');
+const hdmi = boot1.items.find(i => i.name === 'HDMI cable');
+check(hdmi && /^itm_/.test(hdmi.id) && hdmi.available === 10, 'hand-typed sheet row gets an id and counts');
 
-// new submission via trigger
-call('saveSettings',{settings:{ntfyEnabled:true,ntfyTopic:'t1',webhookEnabled:true,webhookUrl:'https://discord.com/api/webhooks/1/x',appUrl:'https://app'}});
-fresp.push(mkResp('c',3000,[['Name','C'],['Gear','Light']]));
-const ft=triggers.find(t=>t.getTriggerSourceId()===FID);
-ctx.handleFormSubmit({triggerUid:ft.getUniqueId()});
-list=call('listResponses').result;
-assert(list.total===3 && list.unread===1 && list.items[0].id==='c','new response stored unread');
-assert(sent.length===1 && sent[0].subject.includes('Gear Request') && sent[0].to==='me@example.com','email sent');
-assert(fetched.length===2 && fetched[0][1].topic==='t1' && fetched[0][1].click==='https://app' && 'content' in fetched[1][1],'ntfy + discord sent');
-ctx.syncAll();
-assert(call('listResponses').result.total===3,'no duplicates on resync');
+// ---------------------------------------------------------------------------
+console.log('checkout');
+check(/email/.test(call('checkout', { borrowerName: 'Ana', borrowerEmail: 'nope', staff: 'Hank', dueAt: inDays(2), items: [{ itemId: cam.id, qty: 1 }] }).error), 'bad email rejected');
+check(/Only 3/.test(call('checkout', { borrowerName: 'Ana', borrowerEmail: 'ana@example.edu', staff: 'Hank', dueAt: inDays(2), items: [{ itemId: cam.id, qty: 4 }] }).error), 'cannot overbook');
+check(/past/.test(call('checkout', { borrowerName: 'Ana', borrowerEmail: 'ana@example.edu', staff: 'Hank', dueAt: inDays(-1), items: [{ itemId: cam.id, qty: 1 }] }).error), 'past due date rejected');
 
-// sheet source with manual rows
-const ss=new SS('Signups'); ss.sheets[0].data=[['Timestamp','Name','Shift'],[new Date(5000),'Sam','AM']];
-r=call('addSource',{url:ss.getUrl()+'/edit#gid='+ss.sheets[0].id,importExisting:false});
-assert(r.ok && r.result.count===0 && r.result.name==='Signups › Sheet1','sheet linked without import');
-ss.sheets[0].data.push([new Date(6000),'Jo','PM'],['','','']);
-const before=sent.length; ctx.syncAll();
-list=call('listResponses',{sourceId:r.result.id}).result;
-assert(list.total===1 && list.items[0].data[1][1]==='Jo','new sheet row picked up, blank skipped');
-assert(sent.length===before+1,'notified for sheet row');
-call('updateSource',{id:r.result.id,notify:false});
-ss.sheets[0].data.push([new Date(7000),'Kim','AM']); ctx.syncAll();
-assert(sent.length===before+1,'notify off respected');
+let co = ok('checkout', {
+  borrowerName: 'Ana Ruiz', borrowerEmail: 'Ana@Example.edu', borrowerPhone: '+1 555 0100', borrowerGroup: 'FILM 210',
+  staff: 'Hank', dueAt: inDays(2), notes: 'Short film shoot', sendEmail: true,
+  items: [{ itemId: cam.id, qty: 2 }, { itemId: mic.id, qty: 1 }, { itemId: tri.id, qty: 1 }]
+});
+check(co.rental.id === 'CDX-0001' && co.rental.status === 'Out', 'rental created with id CDX-0001');
+check(co.rental.borrowerEmail === 'ana@example.edu' && co.rental.borrowerPhone === '+1 555 0100', 'email lower-cased, phone kept as text');
+const items1 = Object.fromEntries(co.snapshot.items.map(i => [i.id, i]));
+check(items1[cam.id].available === 1 && items1[cam.id].checkedOut === 2 && items1[tri.id].available === 0, 'inventory drops as gear goes out');
+check(gas.sent.length === 1 && /checkout CDX-0001/.test(gas.sent[0].subject) && gas.sent[0].to === 'ana@example.edu', 'checkout summary emailed');
+check(/isn’t available/.test(call('checkout', { borrowerName: 'Bo', borrowerEmail: 'bo@example.edu', staff: 'Hank', dueAt: inDays(1), items: [{ itemId: tri.id, qty: 1 }] }).error), 'unavailable item blocked');
 
-// search, mark read, delete, remove
-assert(call('listResponses',{q:'kim'}).result.total===1,'search');
-assert(call('markRead',{all:true}).ok && call('listResponses').result.unread===0,'mark all read');
-const cid=call('listResponses',{q:'light'}).result.items[0].id;
-call('deleteResponses',{ids:[cid]}); assert(call('listResponses').result.total===4,'delete one');
-call('removeSource',{id:r.result.id,deleteResponses:true});
-assert(call('listResponses').result.total===2 && !triggers.some(t=>t.getTriggerSourceId()===ss.id),'remove source + trigger + responses');
-assert(call('testNotification').result.sentTo.length===3,'test notification');
-assert(call('status').ok,'status');
+// sheet columns stay readable
+const invRows = ss.getSheetByName('Inventory').data;
+const col = h => invRows[0].indexOf(h);
+const camRow = invRows.find(r => r[col('id')] === cam.id);
+check(camRow[col('checkedOut')] === 2 && camRow[col('available')] === 1, 'sheet shows live checked-out / available');
+const rRows = ss.getSheetByName('Rentals').data;
+check(/2× Canon EOS R6 \(0012\)/.test(rRows[1][rRows[0].indexOf('itemsSummary')]), 'rental sheet has a readable item summary');
+
+// ---------------------------------------------------------------------------
+console.log('partial return + receipt');
+const before = gas.sent.length;
+let ret = ok('confirmReturn', {
+  id: 'CDX-0001', staff: 'Jules', notes: 'Mic was a bit dusty',
+  lines: [{ itemId: cam.id, qty: 2, condition: 'Good' }, { itemId: mic.id, qty: 1, condition: 'Damaged', note: 'cracked clip' }]
+});
+check(ret.rental.status === 'Partially returned', 'partial return keeps rental open');
+check(ret.email.sent && gas.sent.length === before + 1, 'receipt emailed on confirmation');
+const mail = gas.sent[gas.sent.length - 1];
+check(/Return receipt CDX-0001/.test(mail.subject) && /Still out/.test(mail.htmlBody) && /Manfrotto/.test(mail.htmlBody), 'receipt lists what is still out');
+check(mail.inlineImages && mail.inlineImages.studioLogo && /cid:studioLogo/.test(mail.htmlBody), 'receipt carries the Studio logo');
+check(/Damaged/.test(mail.body) && /Jules/.test(mail.body), 'plain-text receipt has condition and staff');
+const items2 = Object.fromEntries(ret.snapshot.items.map(i => [i.id, i]));
+check(items2[cam.id].available === 3, 'returned cameras available again');
+check(items2[mic.id].outOfService === 1 && items2[mic.id].available === 1 && /cracked clip/.test(items2[mic.id].notes), 'damaged mic moved out of service with a note');
+check(/Only 1/.test(call('confirmReturn', { id: 'CDX-0001', staff: 'Jules', lines: [{ itemId: tri.id, qty: 2 }] }).error), 'cannot return more than is out');
+
+console.log('final return');
+ret = ok('confirmReturn', { id: 'CDX-0001', staff: 'Jules', lines: [{ itemId: tri.id, qty: 1, condition: 'Good' }] });
+check(ret.rental.status === 'Returned' && ret.rental.returnedAt && ret.rental.receiptSentAt, 'rental closed, receipt time stored');
+check(!/Still out/.test(gas.sent[gas.sent.length - 1].htmlBody), 'final receipt has nothing still out');
+check(/already returned/.test(call('confirmReturn', { id: 'CDX-0001', staff: 'J', lines: [{ itemId: tri.id, qty: 1 }] }).error), 'double return blocked');
+check(ok('resendReceipt', { id: 'CDX-0001', staff: 'Hank' }).email.sent, 'receipt can be resent');
+
+// ---------------------------------------------------------------------------
+console.log('lost gear, edits, cancel, email failure');
+co = ok('checkout', { borrowerName: 'Bo Chen', borrowerEmail: 'bo@example.edu', staff: 'Hank', dueAt: inDays(1), items: [{ itemId: hdmi.id, qty: 3 }] });
+check(co.rental.id === 'CDX-0002', 'ids count up');
+const newDue = inDays(5);
+check(ok('updateRental', { id: 'CDX-0002', dueAt: newDue, staff: 'Hank' }).rental.dueAt === newDue, 'due date extended');
+ret = ok('confirmReturn', { id: 'CDX-0002', staff: 'Hank', sendReceipt: false, lines: [{ itemId: hdmi.id, qty: 3, condition: 'Lost' }] });
+const hd = ret.snapshot.items.find(i => i.id === hdmi.id);
+check(hd.totalQty === 7 && hd.available === 7 && ret.email === null, 'lost gear removed from inventory, receipt skipped when unticked');
+
+co = ok('checkout', { borrowerName: 'Cy', borrowerEmail: 'cy@example.edu', staff: 'Hank', dueAt: inDays(1), items: [{ itemId: cam.id, qty: 1 }] });
+check(/checked out/.test(call('saveItem', { item: Object.assign({}, cam, { totalQty: 0 }) }).error), 'total cannot drop below what is out');
+check(/checked out right now/.test(call('setItemArchived', { id: cam.id, archived: true }).error), 'cannot archive gear that is out');
+const cancelled = ok('cancelRental', { id: co.rental.id, staff: 'Hank', reason: 'entered by mistake' });
+check(cancelled.rental.status === 'Cancelled' && cancelled.snapshot.items.find(i => i.id === cam.id).available === 3, 'cancel frees the gear');
+
+gas.setOption('failMail', 'Service invoked too many times');
+co = ok('checkout', { borrowerName: 'Di', borrowerEmail: 'di@example.edu', staff: 'Hank', dueAt: inDays(1), items: [{ itemId: cam.id, qty: 1 }] });
+ret = ok('confirmReturn', { id: co.rental.id, staff: 'Hank', lines: [{ itemId: cam.id, qty: 1 }] });
+check(ret.rental.status === 'Returned' && !ret.email.sent && /too many/.test(ret.rental.lastEmailError), 'email failure still records the return');
+gas.setOption('failMail', null);
+
+// ---------------------------------------------------------------------------
+console.log('settings + log');
+check(/valid email/.test(call('saveSettings', { settings: { receiptCc: 'team@example.edu, nope' } }).error), 'bad cc rejected');
+const s = ok('saveSettings', { settings: { staff: 'Hank\nJules\nHank', receiptCc: 'team@example.edu', defaultLoanDays: '7' } }).settings;
+check(s.staff.join() === 'Hank,Jules' && s.defaultLoanDays === 7, 'settings saved and cleaned');
+ok('checkout', { borrowerName: 'Ed', borrowerEmail: 'ed@example.edu', staff: 'Jules', dueAt: inDays(1), sendEmail: true, items: [{ itemId: mic.id, qty: 1 }] });
+check(gas.sent[gas.sent.length - 1].cc === 'team@example.edu', 'team copied on emails');
+const act = ss.getSheetByName('Activity').data;
+check(act.length > 10 && act.some(r => r[2] === 'Partial return' && r[1] === 'Jules'), 'activity log records who did what');
+const b = ok('bootstrap');
+check(b.rentals[0].status === 'Out' && b.conditions.length === 4 && b.sheetUrl, 'bootstrap lists open rentals first');
+
+if (failures) { console.error('\n' + failures + ' check(s) failed'); process.exit(1); }
+console.log('\nAll backend checks passed.');

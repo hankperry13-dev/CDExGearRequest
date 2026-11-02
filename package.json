@@ -1,0 +1,11 @@
+{
+  "name": "cdex-gear-desk",
+  "private": true,
+  "description": "Gear Desk — gear rental tracker for The Studio, Center for Digital Expression (Google Apps Script).",
+  "scripts": {
+    "test": "node tests/backend.test.js",
+    "test:ui": "node tests/ui.test.js",
+    "preview": "node tools/build-preview.js",
+    "brand": "node tools/build-brand.js"
+  }
+}

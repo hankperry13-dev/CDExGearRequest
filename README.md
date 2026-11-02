@@ -1,88 +1,113 @@
-# Form Hub
+# Gear Desk — The Studio · Center for Digital Expression
 
-Collect Google Forms and Google Sheets responses in one place and open them on your phone or laptop. You can get an alert each time someone submits.
+Gear Desk is a web app the Studio team uses to lend out gear. It does three things:
 
-- **Link any number of Google Forms or Sheets.** Paste a link and Form Hub copies every new response into one spreadsheet in your own Google Drive.
-- **Use it on any device.** The web app installs on iPhone, Android, Mac and Windows. It has an inbox, search, filters, unread tracking and CSV export, and it works offline with the last responses it saved.
-- **Get notified about new submissions** by:
-  - **Email**
-  - **Phone/desktop push** through the free [ntfy](https://ntfy.sh) app
-  - **A Slack / Discord / Google Chat channel**
-  - **Browser notifications** while the app is open
+- **Tracks rentals.** You record who borrowed what and when it's due. Overdue loans move to the top of the list.
+- **Keeps inventory up to date.** The number of items available goes down when gear is checked out and back up when it's returned. Gear marked damaged moves to *out of service*, and gear marked lost is subtracted from the total.
+- **Emails the borrower a receipt when you confirm a return.** The receipt uses Studio branding and lists what came back, the condition of each item, anything still out, and who checked it in. You can also email a checkout summary with the due date when gear goes out.
 
-  You can turn alerts on or off for each linked form.
+It runs on Google Apps Script, so it's free and lives in the cloud. Your team opens one web link and signs in with Google. All data is stored in one Google Sheet, **The Studio — Gear Tracker**, which you can open, filter, and export at any time.
 
-Responses never pass through a third-party database. They stay in your Google account, in a spreadsheet called **Form Hub — Responses**.
+The screens and the receipt email follow the Studio's branding sheet: the *The Studio* script logo, the Center for Digital Expression computer badge, the plum/violet/gold/sky palette, and spaced uppercase labels.
 
-## How it works
+## Try it first (no setup)
 
-```
-Google Form ──submit──▶ Apps Script backend (your Google account)
-Google Sheet ─rows───▶   • copies response into "Form Hub — Responses" sheet
-                         • sends email / push / webhook alerts
-                         • JSON API  ◀──── Form Hub web app (phone & laptop)
+```bash
+node tools/build-preview.js
 ```
 
-| Folder / file | What it is |
+Open `dist/preview.html` in a browser. The preview runs the real app with sample data. Nothing is saved there, and emails appear in a **Demo outbox** instead of being sent.
+
+## What's in this repository
+
+| Path | What it is |
 |---|---|
-| `apps-script/Code.gs`, `apps-script/appsscript.json` | Backend. You paste these into Google Apps Script. |
-| `index.html`, `app.js`, `styles.css`, `sw.js`, `manifest.webmanifest`, `icons/` | The web app. It is hosted free on GitHub Pages. |
-| `tests/backend.test.js` | Tests the backend logic against mocked Google services (`node tests/backend.test.js`). |
+| `apps-script/Code.gs` | Backend code: storage, inventory math, checkouts, returns, and receipt emails |
+| `apps-script/Brand.gs` | Logo images used by the app and the emails (generated from `brand/`) |
+| `apps-script/Index.html`, `Styles.html`, `App.html` | The web app the team uses |
+| `apps-script/appsscript.json` | Apps Script settings: permissions, time zone, and who can open the app |
+| `brand/` | Logo PNGs taken from the branding sheet |
+| `tests/` | `backend.test.js` (backend logic) and `ui.test.js` (full browser run-through) |
+| `tools/` | `build-preview.js` (the clickable preview) and `build-brand.js` (rebuilds `Brand.gs` after a logo change) |
 
 ## Setup
 
-Setup takes about 10 minutes and only has to be done once.
+Setup takes about 10 minutes and is done once.
 
-### 1. Create the backend
+> **Use the Studio's shared Google account if you have one.** Receipts are sent from the account that sets this up, and the spreadsheet lives in that account's Drive.
 
-1. Go to [script.google.com](https://script.google.com) and click **New project**. Name it `Form Hub`.
-2. Replace everything in `Code.gs` with the contents of [`apps-script/Code.gs`](apps-script/Code.gs).
-3. Click **Project Settings** (gear icon) and tick **Show "appsscript.json" manifest file in editor**. Go back to the editor, open `appsscript.json` and replace its contents with [`apps-script/appsscript.json`](apps-script/appsscript.json). Change `timeZone` if you're not on US Eastern time.
-4. Choose the `setup` function in the toolbar and click **Run**. Approve the permissions when Google asks:
-   - If you see "Google hasn't verified this app", click **Advanced → Go to Form Hub**. The script is your own.
-5. Open **Execution log** and copy the **API key**. It also contains the link to your new hub spreadsheet.
+### 1. Create the Apps Script project
 
-### 2. Publish the backend as a web app
+1. Go to [script.google.com](https://script.google.com) and click **New project**. Name it `Gear Desk`.
+2. Click **Project Settings** (the gear icon) and tick **Show "appsscript.json" manifest file in editor**.
+3. Go back to **Editor** and create one project file for each file in `apps-script/`, using the same name, then paste in its contents:
+   - **Script** files (`+` → *Script*): `Code`, `Brand`. The editor already has `Code.gs`; replace what's in it.
+   - **HTML** files (`+` → *HTML*): `Index`, `Styles`, `App`.
+   - `appsscript.json`: replace what's in it.
+4. Edit `appsscript.json` if needed:
+   - Change `timeZone` if the Studio isn't on US Eastern time.
+   - `"access": "DOMAIN"` means only people in your school or organization's Google Workspace can open the app. If you set this up with a personal `@gmail.com` account, change it to `"ANYONE"`, which means anyone signed in to Google who has the link.
 
-1. Click **Deploy → New deployment**, then click the gear and choose **Web app**.
+### 2. Approve permissions
+
+1. Pick `setup` in the function menu at the top of the editor and click **Run**.
+2. Approve the permissions Google asks for: the spreadsheet, sending email as you, and seeing your email address.
+   - If you see "Google hasn't verified this app", click **Advanced → Go to Gear Desk**. It's your own script.
+3. Open the **Execution log** to find the link to your new spreadsheet.
+
+### 3. Publish the web app
+
+1. Click **Deploy → New deployment**. Click the gear next to *Select type* and choose **Web app**.
 2. Set **Execute as:** *Me*.
-3. Set **Who has access:** *Anyone*. This is required so the phone app can reach it, and every request still needs your API key.
-4. Click **Deploy** and copy the **Web app URL** (it ends in `/exec`).
+3. Set **Who has access:**
+   - *Anyone within [your organization]* (recommended), or
+   - *Anyone with a Google account* for personal Gmail setups.
+4. Click **Deploy** and copy the **Web app URL**. This is the link for your team. Bookmark it on the desk computer and share it in your team chat.
 
-### 3. Put the app online (GitHub Pages)
+### 4. First run
 
-1. Merge this branch into `main`.
-2. In this GitHub repository, go to **Settings → Pages**.
-3. Set **Source:** *Deploy from a branch*, then choose **Branch:** `main` and the `/ (root)` folder. Click **Save**.
-4. After a minute the app is live at **https://hankperry13-dev.github.io/CDExGearRequest/**.
+1. Open the link. Go to **Settings** and add:
+   - Your team's names
+   - The default loan length and due time
+   - A reply-to address
+   - A contact line (for example, room and hours) for the bottom of receipts
+2. Add your gear in **Inventory**, one row per kind of item, with how many you own.
 
-### 4. Connect and link your forms
+   Already have a list? Paste it into the **Inventory** tab of the spreadsheet. Fill in at least the `name`, `category`, and `totalQty` columns and leave `id` blank. Gear Desk assigns IDs the next time it loads.
 
-1. Open the app URL on your laptop. Paste the **Web app URL** and **API key**, then click **Connect**.
-2. Go to **Linked** and paste a link:
-   - **Google Form:** open the form in *edit* mode and copy the address bar (`docs.google.com/forms/d/…/edit`). The `forms.gle` share link won't work.
-   - **Google Sheet:** open the tab you want and copy the address bar. Linking a sheet also catches rows typed in by hand, which are checked every 5 minutes.
-   - Link a form **or** its response sheet, not both. Linking both makes every submission show up twice.
-3. Go to **Alerts & settings** and turn on the alerts you want, then click **Send a test**.
+## Using it day to day
 
-### 5. Add it to your phone
+- **Check out:** Go to **Check out**. Enter the borrower's name and email, tap **+** next to each item, choose a due date, and click **Check out**.
+  - Returning borrowers autofill from their last loan.
+  - You can't check out more than is on the shelf.
+- **Confirm a return:** On **Out now**, click **Confirm return**.
+  - Set how many of each item came back and its condition: *Good*, *Needs attention*, *Damaged*, or *Lost*.
+  - Add an optional note and confirm. The receipt is emailed right away.
+  - If only part of the gear comes back, the loan stays open and shows what's still out.
+- **Fix mistakes:** Open **Details** on any loan to change the due date or email, resend the receipt, or cancel a loan entered by mistake.
+- **Look things up:** **History** lists every loan. The **Activity** tab in the spreadsheet logs each action with who did it.
 
-1. On your laptop, open **Alerts & settings → Link another device** and scan the QR code with your phone. Your phone connects without typing anything.
-2. Install the app:
-   - **iPhone:** tap Share → **Add to Home Screen**.
-   - **Android:** use the browser menu → **Install app**.
-3. For alerts when the app is closed, install **ntfy** and subscribe to the topic shown in settings. Email alerts also work.
+## Updating the app
 
-## Updating the backend
+After changing files here, paste the changed files into the Apps Script editor. Then go to **Deploy → Manage deployments**, click the pencil icon, choose **Version: New version**, and click **Deploy**. The link stays the same.
 
-After you change `Code.gs`, go to **Deploy → Manage deployments**, click the pencil icon, set **Version: New version**, and click **Deploy**. The URL stays the same.
+To change a logo, replace the PNG in `brand/`, run `node tools/build-brand.js`, and paste the new `Brand.gs`.
 
 ## Good to know
 
-- **Speed:** Form submissions arrive almost instantly. A background check also runs every 5 minutes, so nothing is missed.
-- **Email limits:** Free Google accounts can send about 100 emails a day (Workspace accounts: 1,500). For busy forms, use ntfy push.
-- **Who can see your data:**
-  - Anyone with your API key can read your responses. Only share the "Link another device" QR code with your own devices.
-  - If a key leaks, run `rotateApiKey` in Apps Script and reconnect your devices.
-  - Anyone who knows your ntfy topic can read push alerts, so use the **Generate** button to get a hard-to-guess topic.
-- **Deleting in Form Hub** only removes the copy in the hub spreadsheet. The original form or sheet is never changed.
+- **Email limits:** Google allows about 100 emails a day from a personal account and 1,500 from a Workspace account. **Settings** shows how many are left today.
+  - If an email fails, the return is still saved, and you can resend the receipt from the loan's **Details**.
+- **Fonts:** The brand fonts (*The Youngest Script*, *Glacial Indifference*, *TAN Headline*) are used on computers that have them installed. Elsewhere, the app uses the free look-alikes *Outfit* and *Archivo Black*. The script logo is an image, so it always looks right.
+- **Data:** Don't rename the spreadsheet's tabs or column headers. You can add your own columns, and they're kept.
+
+## Tests
+
+```bash
+node tests/backend.test.js
+```
+
+```bash
+node tests/ui.test.js
+```
+
+`ui.test.js` needs Playwright and saves screenshots to `dist/screens/`.
