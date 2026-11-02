@@ -14,7 +14,7 @@
   <header class="masthead">
     <div class="masthead__inner">
       <a class="brand" href="#" data-go="desk" aria-label="Gear Desk home">
-        <img class="brand__mark" src="<?= brandDataUri('wordmarkWhite') ?>" alt="The Studio" width="128" height="44">
+        <img class="brand__mark" src="<?!= brandDataUri('wordmarkWhite') ?>" alt="The Studio" width="128" height="44">
         <span class="brand__divider" aria-hidden="true"></span>
         <span class="brand__text">
           <span class="brand__app">Gear Desk</span>
@@ -49,7 +49,7 @@
 
   <main id="main" tabindex="-1">
     <div class="loading">
-      <img id="badgeImg" src="<?= brandDataUri('badge') ?>" alt="">
+      <img id="badgeImg" src="<?!= brandDataUri('badge') ?>" alt="">
       <div>Opening the gear desk…</div>
     </div>
   </main>
