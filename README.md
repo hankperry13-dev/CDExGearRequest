@@ -25,7 +25,7 @@ Open `dist/preview.html` in a browser. The preview runs the real app with sample
 | `apps-script/Code.gs` | Backend code: storage, inventory math, checkouts, returns, and receipt emails |
 | `apps-script/Brand.html` | Logo images used by the app and the emails (generated from `brand/`) |
 | `apps-script/Index.html`, `Styles.html`, `App.html` | The web app the team uses |
-| `apps-script/appsscript.json` | Apps Script settings: permissions, time zone, and who can open the app |
+| `apps-script/appsscript.json` | Apps Script settings: permissions and time zone |
 | `brand/` | Logo PNGs taken from the branding sheet |
 | `tests/` | `backend.test.js` (backend logic) and `ui.test.js` (full browser run-through) |
 | `tools/` | `build-preview.js` (the clickable preview) and `build-brand.js` (rebuilds `Brand.html` after a logo change) |
@@ -45,9 +45,7 @@ Setup takes about 10 minutes and is done once.
    - **HTML** files (`+` → *HTML*): `Index`, `Styles`, `App`, `Brand`. Type the name without `.html`. Replace the starter code Apps Script puts in each new file.
    - `Brand.html` is one long block of letters and numbers, which is the logo images. Copy all of it.
    - `appsscript.json`: replace what's in it.
-4. Edit `appsscript.json` if needed:
-   - Change `timeZone` if the Studio isn't on US Eastern time.
-   - `"access": "DOMAIN"` means only people in your school or organization's Google Workspace can open the app. If you set this up with a personal `@gmail.com` account, change it to `"ANYONE"`, which means anyone signed in to Google who has the link.
+4. In `appsscript.json`, change `timeZone` if the Studio isn't on US Eastern time. It must be a name from [this list](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones), such as `America/Chicago`. Keep the quotes and commas exactly as they are.
 
 ### 2. Approve permissions
 
