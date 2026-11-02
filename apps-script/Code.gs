@@ -542,16 +542,31 @@ function buildEmail_(rental, event, settings) {
   return { subject: subject, html: html, text: text };
 }
 
+var brandCache_ = null;
+
+/** The logo images, stored as JSON in the Brand.html project file. */
+function brandImages_() {
+  if (!brandCache_) {
+    var raw = HtmlService.createHtmlOutputFromFile('Brand').getContent();
+    var start = raw.indexOf('{'), end = raw.lastIndexOf('}');
+    try { brandCache_ = JSON.parse(raw.slice(start, end + 1)); } catch (err) {
+      throw new Error('The Brand file is missing or damaged. Paste apps-script/Brand.html into it again.');
+    }
+  }
+  return brandCache_;
+}
+
 function brandBlobs_() {
+  var b = brandImages_();
   return {
-    studioLogo: Utilities.newBlob(Utilities.base64Decode(BRAND_IMAGES.wordmarkWhite), 'image/png', 'the-studio.png'),
-    cdxBadge: Utilities.newBlob(Utilities.base64Decode(BRAND_IMAGES.badge), 'image/png', 'cdx-badge.png')
+    studioLogo: Utilities.newBlob(Utilities.base64Decode(b.wordmarkWhite), 'image/png', 'the-studio.png'),
+    cdxBadge: Utilities.newBlob(Utilities.base64Decode(b.badge), 'image/png', 'cdx-badge.png')
   };
 }
 
 /** Used by Index.html for the logo images. */
 function brandDataUri(name) {
-  return 'data:image/png;base64,' + BRAND_IMAGES[name];
+  return 'data:image/png;base64,' + brandImages_()[name];
 }
 
 /* ------------------------------------------------------------------ */

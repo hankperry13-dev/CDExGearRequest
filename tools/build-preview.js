@@ -13,9 +13,10 @@ const out = path.resolve(process.argv[2] || path.join(root, 'dist', 'preview.htm
 
 // Evaluate the template scriptlets (<?= ?> / <?!= ?>) the same way HtmlService would.
 const createGasMock = require('../tests/gas-mock');
-const ctx = Object.assign({ Intl }, createGasMock().globals);
+const brandJson = src('Brand.html');
+const ctx = Object.assign({ Intl }, createGasMock({ files: { Brand: brandJson } }).globals);
 vm.createContext(ctx);
-vm.runInContext(src('Brand.gs') + '\n' + src('Code.gs'), ctx);
+vm.runInContext(src('Code.gs'), ctx);
 ctx.include = (name) => src(name + '.html');
 const escAttr = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 let html = src('Index.html').replace(/<\?(!?)=\s*([\s\S]*?)\s*;?\s*\?>/g, (m, raw, expr) => {
@@ -28,12 +29,11 @@ const backend = `
 <script>
 (function () {
   var MOCK = createGasMock({ user: 'desk@studio.example.edu', owner: 'studio@example.edu',
-    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, files: { Brand: ${JSON.stringify(brandJson)} } });
   var Logger = MOCK.globals.Logger, PropertiesService = MOCK.globals.PropertiesService,
     SpreadsheetApp = MOCK.globals.SpreadsheetApp, LockService = MOCK.globals.LockService,
     MailApp = MOCK.globals.MailApp, Session = MOCK.globals.Session, Utilities = MOCK.globals.Utilities,
     HtmlService = MOCK.globals.HtmlService;
-${src('Brand.gs')}
 ${src('Code.gs')}
   window.__gearDesk = { api: api, mock: MOCK, setup: setup };
 })();

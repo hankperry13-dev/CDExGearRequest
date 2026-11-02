@@ -23,12 +23,12 @@ Open `dist/preview.html` in a browser. The preview runs the real app with sample
 | Path | What it is |
 |---|---|
 | `apps-script/Code.gs` | Backend code: storage, inventory math, checkouts, returns, and receipt emails |
-| `apps-script/Brand.gs` | Logo images used by the app and the emails (generated from `brand/`) |
+| `apps-script/Brand.html` | Logo images used by the app and the emails (generated from `brand/`) |
 | `apps-script/Index.html`, `Styles.html`, `App.html` | The web app the team uses |
 | `apps-script/appsscript.json` | Apps Script settings: permissions, time zone, and who can open the app |
 | `brand/` | Logo PNGs taken from the branding sheet |
 | `tests/` | `backend.test.js` (backend logic) and `ui.test.js` (full browser run-through) |
-| `tools/` | `build-preview.js` (the clickable preview) and `build-brand.js` (rebuilds `Brand.gs` after a logo change) |
+| `tools/` | `build-preview.js` (the clickable preview) and `build-brand.js` (rebuilds `Brand.html` after a logo change) |
 
 ## Setup
 
@@ -41,8 +41,9 @@ Setup takes about 10 minutes and is done once.
 1. Go to [script.google.com](https://script.google.com) and click **New project**. Name it `Gear Desk`.
 2. Click **Project Settings** (the gear icon) and tick **Show "appsscript.json" manifest file in editor**.
 3. Go back to **Editor** and create one project file for each file in `apps-script/`, using the same name, then paste in its contents:
-   - **Script** files (`+` → *Script*): `Code`, `Brand`. The editor already has `Code.gs`; replace what's in it.
-   - **HTML** files (`+` → *HTML*): `Index`, `Styles`, `App`.
+   - **Script** file: `Code`. The editor already has `Code.gs`; replace what's in it.
+   - **HTML** files (`+` → *HTML*): `Index`, `Styles`, `App`, `Brand`. Type the name without `.html`. Replace the starter code Apps Script puts in each new file.
+   - `Brand.html` is one long block of letters and numbers, which is the logo images. Copy all of it.
    - `appsscript.json`: replace what's in it.
 4. Edit `appsscript.json` if needed:
    - Change `timeZone` if the Studio isn't on US Eastern time.
@@ -91,7 +92,7 @@ Setup takes about 10 minutes and is done once.
 
 After changing files here, paste the changed files into the Apps Script editor. Then go to **Deploy → Manage deployments**, click the pencil icon, choose **Version: New version**, and click **Deploy**. The link stays the same.
 
-To change a logo, replace the PNG in `brand/`, run `node tools/build-brand.js`, and paste the new `Brand.gs`.
+To change a logo, replace the PNG in `brand/`, run `node tools/build-brand.js`, and paste the new `Brand.html`.
 
 ## Good to know
 

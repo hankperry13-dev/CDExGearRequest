@@ -144,7 +144,13 @@
         base64Decode: function (b64) { return { b64: b64 }; },
         newBlob: function (bytes, type, name) { return { b64: bytes.b64, type: type, name: name }; }
       },
-      HtmlService: {}
+      HtmlService: {
+        createHtmlOutputFromFile: function (name) {
+          var files = opts.files || {};
+          if (!files.hasOwnProperty(name)) throw new Error('No HTML file named ' + name);
+          return { getContent: function () { return files[name]; } };
+        }
+      }
     };
 
     return {

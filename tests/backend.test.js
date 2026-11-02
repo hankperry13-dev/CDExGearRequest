@@ -3,10 +3,10 @@ const fs = require('fs'), path = require('path'), vm = require('vm');
 const createGasMock = require('./gas-mock');
 
 function boot(opts) {
-  const gas = createGasMock(opts);
+  const gas = createGasMock(Object.assign({ files: { Brand: fs.readFileSync(path.join(__dirname, '../apps-script/Brand.html'), 'utf8') } }, opts));
   const ctx = Object.assign({ console, Intl }, gas.globals);
   vm.createContext(ctx);
-  for (const f of ['Brand.gs', 'Code.gs']) {
+  for (const f of ['Code.gs']) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '../apps-script', f), 'utf8'), ctx, { filename: f });
   }
   const call = (action, payload) => {
